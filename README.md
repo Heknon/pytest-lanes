@@ -66,8 +66,9 @@ Tests in one scope run sequentially, in order, on one lane; different scopes run
 |---|---|
 | `--lanes N` | N lanes in this process. In hybrid mode, N lanes *per xdist process*, so the total is `-n` × `--lanes` |
 | `--lanes-dist MODE` | Built-in scheduler for single-process mode, when no `pytest_xdist_make_scheduler` returns one |
-| `@pytest.mark.lanes_exclusive` | Run this test alone within its process |
-| ini `lanes_exclusive_fixtures` | Fixtures that make a test exclusive. Default: capsys, capsysbinary, capfd, capfdbinary, capteesys, recwarn |
+| `@pytest.mark.lanes_exclusive` | Run this test alone within its process. Doctests always are, since doctest swaps `sys.stdout` for the whole process |
+| ini `lanes_exclusive_fixtures` | Fixtures that make a test exclusive. Default: capsys, capsysbinary, capfd, capfdbinary, capteesys, recwarn. Requesting one at run time (`request.getfixturevalue`) from a test that is not exclusive fails that test with instructions |
+| `-s` / `--capture=no` | As under xdist: test output goes straight to the terminal. Log records are still captured per test |
 | `--lanes-xdist-node-hooks` + ini `lanes_node_hook_plugins` | Single-process mode: fire xdist's `pytest_testnodeready` / `testnodedown` for each lane, but only to the named plugins (default `conftest`) |
 
 Each test report carries `report.lane_id`, such as `ln3` or `gw2.ln3`. In single-process mode `report.node` is the lane, just as it is the worker under xdist.
@@ -106,7 +107,7 @@ Two problems have to be solved to run many pytest tests at once in one process:
 1. **pytest keeps per-run state that assumes one test at a time.** This covers `SetupState`, fixture caches, capture, log handlers and a couple of races. `isolation.py` and `capture.py` re-key each of these by the current lane, using a contextvar (`LANE`) that is set on each lane thread.
 2. **Reporters expect one thread and xdist's hook split.** xdist forwards exactly four hooks from workers to the controller: `pytest_runtest_logstart`, `logreport`, `logfinish` and `warning_recorded`. `hookrouting.py` intercepts those four on lanes, queues them, and the main thread replays them in order. Every other hook runs on the lane, as it would in a worker.
 
-Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P8, X1–X4), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
+Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P9, X1–X4), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
 
 ### The life of one test (`--lanes N`)
 
@@ -133,7 +134,7 @@ Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **
 src/pytest_lanes/
   plugin.py        entry point: options, mode selection (no logic)
   lane.py          ThreadNode (one lane) and the LANE contextvar
-  runner.py        LaneRunner: lane threads, main-thread pump, capture hooks, exclusivity lock
+  runner.py        LaneRunner: lane threads, main-thread pump, capture hooks, exclusivity  (P9)
   single.py        --lanes N
   worker.py        -n P --lanes M, worker process                       (X2)
   controller.py    -n P --lanes M, controller: LanesController, LaneMux  (X3, X4)

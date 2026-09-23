@@ -45,7 +45,8 @@ def test_writes_through_stdout_buffer_are_captured_per_test(pytester):
     rows = {}
     for name, mode in MODES.items():
         result, rows[name] = report_log(pytester, *mode, "-rP")
-        result.stdout.fnmatch_lines(["*raw 0*", "*raw 1*", "*raw 2*"])   # in the report, not lost
+        for i in range(3):                                   # in the report, not lost
+            result.stdout.fnmatch_lines([f"raw {i}"])
     assert rows["lanes"] == rows["xdist"]
     assert rows["hybrid"] == rows["xdist"]
 
@@ -85,8 +86,8 @@ def test_capture_fixture_requested_dynamically_fails_closed(pytester, fixture):
             request.getfixturevalue("{fixture}")
     """)
     r = run(pytester, "--lanes", "2", timeout=60)
-    r.assert_outcomes(errors=1)
-    r.stdout.fnmatch_lines(["*lanes_exclusive*"])
+    r.assert_outcomes(failed=1)          # requested during the call, so the call fails
+    r.stdout.fnmatch_lines([f"*'{fixture}' was requested at run time*lanes_exclusive*"])
 
 
 def test_capture_fixture_requested_dynamically_works_when_marked_exclusive(pytester):

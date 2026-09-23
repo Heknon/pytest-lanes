@@ -10,8 +10,11 @@
   drives teardown, and stop at SHUTDOWN;
 * the main-thread event loop (``_pump``), which replays routed hooks and tells
   the controller side about each finished item;
-* the exclusivity lock: tests using capsys, capfd, recwarn (or marked
-  ``lanes_exclusive``) run alone within their process.
+* the exclusivity lock: tests that swap process-wide streams or warning state
+  run alone within their process. That is tests using capsys, capfd, recwarn (the
+  ``lanes_exclusive_fixtures`` ini), marked ``lanes_exclusive``, and doctests,
+  whose runner swaps ``sys.stdout``. A capture fixture requested at run time by a
+  test that is not exclusive fails that test with instructions.
 """
 from __future__ import annotations
 
@@ -28,6 +31,15 @@ from .capture import capture_phase
 from .hookrouting import ControllerHookRouter, HookCall
 from .isolation import isolate_lanes
 from .lane import LANE, SHUTDOWN, ThreadNode
+
+
+def is_doctest(item) -> bool:
+    """P9: doctest items, whose runner swaps sys.stdout for the whole process."""
+    try:
+        from _pytest.doctest import DoctestItem
+    except ImportError:  # pragma: no cover - the probe fails first
+        return False
+    return isinstance(item, DoctestItem)
 
 
 class ItemDone(NamedTuple):
@@ -87,7 +99,20 @@ class LaneRunner:
     def is_exclusive(self, item) -> bool:
         fixtures = set(self.config.getini("lanes_exclusive_fixtures"))
         return bool(item.get_closest_marker("lanes_exclusive")
-                    or fixtures & set(getattr(item, "fixturenames", ())))
+                    or fixtures & set(getattr(item, "fixturenames", ()))
+                    or is_doctest(item))
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_fixture_setup(self, fixturedef, request):
+        """Fail closed when an exclusive fixture is requested only at run time."""
+        if LANE.get() is None or fixturedef.argname not in self.config.getini("lanes_exclusive_fixtures"):
+            return None
+        if not self.is_exclusive(request.node):
+            pytest.fail(f"pytest-lanes: {fixturedef.argname!r} was requested at run time "
+                        f"(getfixturevalue), so this test was not scheduled to run alone and "
+                        f"would capture other lanes' output. Add it to the test's arguments "
+                        f"or mark the test @pytest.mark.lanes_exclusive.", pytrace=False)
+        return None
 
     def start(self, node: ThreadNode, items) -> threading.Thread:
         def run():

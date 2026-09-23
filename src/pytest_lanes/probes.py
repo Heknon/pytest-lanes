@@ -47,6 +47,16 @@ def _p8_logger_dict(config):
     return None
 
 
+def _p9_doctest_item(config):
+    if config.pluginmanager.get_plugin("doctest") is None:
+        return None
+    try:
+        from _pytest.doctest import DoctestItem  # noqa: F401
+    except ImportError:
+        return "P9 _pytest.doctest.DoctestItem"
+    return None
+
+
 def _p4_hookexec(config):
     if not hasattr(config.pluginmanager, "_inner_hookexec"):
         return "P4 pluggy PluginManager._inner_hookexec"
@@ -102,7 +112,8 @@ def _per_test_global_hooks(config):
 
 
 CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
-          _p7_basetemp, _p8_logger_dict, _per_test_global_hooks, _x1_xdist_scheduler_api)
+          _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
+          _x1_xdist_scheduler_api)
 
 
 def check_touchpoints(config) -> None:

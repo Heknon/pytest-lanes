@@ -168,5 +168,6 @@ def isolate_lanes(config, session):
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
         stack.enter_context(snapshot_logger_dict())                       # P8
-        stack.enter_context(per_lane_std_streams())
+        if config.getoption("capture") != "no":                          # -s: no capture, as xdist
+            stack.enter_context(per_lane_std_streams())
         yield LaneStateFactory(setupstate_cls, log_templates)

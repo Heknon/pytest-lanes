@@ -4,8 +4,10 @@ pytest's own capture is process-wide, so lanes switch it off (``--capture=no``)
 and capture per lane instead:
 
 * ``sys.stdout``/``sys.stderr`` become ``_LaneStream`` objects that write to the
-  current lane's buffers. The runner turns those buffers into report sections
-  after each phase, as pytest's CaptureManager would.
+  current lane's buffers (bytes written to their ``.buffer`` included). The
+  runner turns those buffers into report sections after each phase, as pytest's
+  CaptureManager would. With ``-s``/``--capture=no`` they are not installed, and
+  output goes straight to the terminal, as under xdist.
 * The logging plugin's ``caplog_handler`` and ``report_handler`` become
   ``_LogDispatch`` stand-ins that forward to the current lane's own copies.
   A permanent ``_LogRouter`` on the root logger does the actual emitting, so
@@ -32,6 +34,7 @@ class _LaneStream(io.TextIOBase):
     def __init__(self, real, attr: str) -> None:
         self._real = real
         self._attr = attr  # "out" or "err": the ThreadNode buffer to write to
+        self._binary = _LaneBinaryStream(self)
 
     def write(self, s):
         lane = LANE.get()
@@ -42,8 +45,33 @@ class _LaneStream(io.TextIOBase):
     def flush(self):
         self._real.flush()
 
+    @property
+    def buffer(self):
+        return self._binary
+
     def __getattr__(self, name):
         return getattr(self._real, name)
+
+
+class _LaneBinaryStream:
+    """``sys.stdout.buffer`` under lanes: bytes are decoded into the lane's text buffer."""
+
+    def __init__(self, text: _LaneStream) -> None:
+        self._text = text
+
+    def write(self, b):
+        lane = LANE.get()
+        if lane is None:
+            return self._text._real.buffer.write(b)
+        encoding = getattr(self._text._real, "encoding", None) or "utf-8"
+        getattr(lane, self._text._attr).write(bytes(b).decode(encoding, "replace"))
+        return len(b)
+
+    def flush(self):
+        self._text.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._text._real.buffer, name)
 
 
 @contextlib.contextmanager
