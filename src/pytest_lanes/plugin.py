@@ -334,7 +334,10 @@ class LanesSession:
             if when:
                 orig_update(item, when)
             else:
-                os.environ.pop("PYTEST_CURRENT_TEST", None)
+                # Not os.environ.pop(k, None): MutableMapping.pop is check-then-delete, and
+                # another lane can delete in between (routinely on free-threaded 3.14t).
+                with contextlib.suppress(KeyError):
+                    del os.environ["PYTEST_CURRENT_TEST"]
 
         self._orig_update = orig_update
         runner._update_current_test_var = _update_current_test_var
