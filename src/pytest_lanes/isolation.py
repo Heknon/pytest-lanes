@@ -9,7 +9,7 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P2 ``FixtureDef.cached_result`` / ``_finalizers``: fixture caches per lane.
 * P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
 * P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
-* P3 and P8 (logging) live in ``capture.py``.
+* P3 and P8 (logging) live in ``capture.py``; C1 (third-party plugins) in ``compat.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
 ``capture.py`` and undoes them on exit.
@@ -28,6 +28,7 @@ from .capture import (
     per_lane_std_streams,
     snapshot_logger_dict,
 )
+from .compat import serialized_rerunfailures_client
 from .lane import LANE
 
 
@@ -225,6 +226,7 @@ def isolate_lanes(config, session):
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
         stack.enter_context(snapshot_logger_dict())                       # P8
+        stack.enter_context(serialized_rerunfailures_client(config))      # C1
         if config.getoption("capture") != "no":                          # -s: no capture, as xdist
             stack.enter_context(per_lane_std_streams())
         yield LaneStateFactory(setupstate_cls, log_templates)
