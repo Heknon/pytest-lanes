@@ -275,6 +275,40 @@ def test_same_custom_scheduler_both_backends(pytester, mode):
     assert r.duration < 4.5, r.duration     # 3 envs in parallel, 3 x 0.5s each
 
 
+NODE_INSPECTING_SCHED = """
+from xdist.scheduler import LoadScopeScheduling
+
+class InspectingScheduling(LoadScopeScheduling):
+    # A custom scheduler may read what xdist's WorkerController offers, e.g. for logging.
+    def add_node(self, node):
+        wi = node.workerinput
+        print(f"\\nNODE {node.gateway.id} workerid={wi['workerid']} count={wi['workercount']} "
+              f"uid={wi['testrunuid']} info={node.workerinfo['id']}", flush=True)
+        super().add_node(node)
+
+def pytest_xdist_make_scheduler(config, log):
+    return InspectingScheduling(config, log)
+"""
+
+
+@pytest.mark.parametrize("mode,total", [(["-n", "2"], 2), (["--lanes", "4"], 4),
+                                        (["-n", "2", "--lanes", "2"], 4)],
+                         ids=["xdist", "lanes", "hybrid"])
+def test_scheduler_sees_worker_shaped_nodes(pytester, mode, total):
+    # Every node handed to the scheduler must carry the attributes of an xdist worker.
+    pytester.makeconftest(NODE_INSPECTING_SCHED)
+    pytester.makepyfile("import pytest\n@pytest.mark.parametrize('i', range(4))\ndef test_t(i): pass")
+    r = run(pytester, *mode, "-s")
+    r.assert_outcomes(passed=4)
+    import re
+    nodes = [re.match(r"NODE (\S+) workerid=(\S+) count=(\d+) uid=(\S+) info=(\S+)", ln).groups()
+             for ln in r.outlines if ln.startswith("NODE ")]
+    assert len(nodes) == total, r.outlines
+    for gid, workerid, count, _, info in nodes:
+        assert workerid == gid == info and int(count) == total, nodes
+    assert len({uid for *_, uid, _ in nodes}) == 1, nodes    # one test run
+
+
 def test_report_parity_with_xdist_loadgroup(pytester):
     import json
     pytest.importorskip("xdist")
