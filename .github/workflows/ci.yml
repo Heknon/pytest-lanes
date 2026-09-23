@@ -1,0 +1,29 @@
+# UNTESTED: written alongside the prototype; verify on first run.
+name: contract
+on: [push, pull_request]
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+        deps:
+          - "pytest==8.3.5 pytest-xdist==3.6.1 pytest-rerunfailures==14.0"
+          - "pytest==9.1.1 pytest-xdist==3.8.0 pytest-rerunfailures"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "${{ matrix.python }}"}
+      - run: pip install ${{ matrix.deps }} pytest-reportlog pytest-html -e .
+      - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings
+  nightly-upstream:
+    # Early warning when pytest/xdist main break a private touchpoint (P1-P6, X1-X3).
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install git+https://github.com/pytest-dev/pytest git+https://github.com/pytest-dev/pytest-xdist pytest-reportlog pytest-rerunfailures pytest-html -e .
+      - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings

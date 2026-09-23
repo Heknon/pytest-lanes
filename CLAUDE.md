@@ -1,0 +1,153 @@
+# CLAUDE.md: pytest-lanes
+
+Read this file first. Read DESIGN.md next for the full rationale, the evidence behind it, and the flags.
+
+## What this is and why
+
+We have a pytest suite of long, I/O-bound tests. Each test takes 1–2 hours, and we need to run thousands of them concurrently. pytest-xdist gives one process per concurrent test, at 150–500 MB each, so memory caps our concurrency. The suite's infrastructure is hundreds of thousands of lines of synchronous code, so converting it to async is not an option.
+
+pytest-lanes runs pytest-xdist's own scheduler objects on thread "lanes":
+
+- `pytest -n 8`: plain xdist, which is the baseline and is unchanged.
+- `pytest --lanes 200`: one process with 200 thread lanes.
+- `pytest -n 8 --lanes 25`: 8 real xdist processes with 25 lanes each, 200 lanes in total.
+
+Tests that share an environment must run sequentially, in order, on one lane. Different environments run in parallel. The user supplies scheduling as a normal xdist custom scheduler, and that exact code must work in all three modes:
+
+```python
+class EnvScheduling(LoadScopeScheduling):
+    def _split_scope(self, nodeid): ...
+def pytest_xdist_make_scheduler(config, log):
+    return EnvScheduling(config, log)
+```
+
+## Non-negotiable invariants
+
+Any change that breaks one of these is a regression.
+
+1. **Indistinguishable from xdist.** A lane must behave like an xdist worker in three ways:
+   - **Scheduling:** decisions come from xdist's real scheduler object.
+   - **Fixtures:** every scope is cached per lane, as it would be per worker.
+   - **Hook split:** only `pytest_runtest_logstart`, `logreport`, `logfinish` and `warning_recorded` are replayed on the controller/main thread. That is exactly the set xdist forwards.
+2. **Report parity.** For the same suite, report-log output (nodeid, when, outcome, and section names in order) must be identical under `-n N --dist X`, `--lanes N --lanes-dist X`, and `-n N --lanes M --dist X`. The parity tests in `tests/` enforce this.
+3. **Fail closed.** Every use of a pytest, pluggy or xdist internal is feature-probed at startup. If a probe fails, the plugin raises `UsageError` with an explanation instead of running incorrectly. Never add a new internal touchpoint without all three of: a probe, an entry in the touchpoint table below and in DESIGN.md, and a contract test.
+4. **Plugins that observe xdist must keep working.** Terminal, junitxml, report-log, pytest-html, pytest-metadata, pytest-cov, rerunfailures, and the user's own failure-instrumentation plugin. xdist node hooks go only to allowlisted plugins in single-process mode, because pytest-metadata uses `pytest_testnodedown` as a data-transfer protocol and crashed when it received them.
+5. **No new dependency on process-global state in the runner.** Per-lane state lives on the `ThreadNode`, keyed by the `_LANE` contextvar.
+
+## File map
+
+- `src/pytest_lanes/plugin.py` holds everything, about 800 lines, in these sections:
+  - **`ThreadNode`:** a lane. It is an xdist WorkerController look-alike that also owns per-lane execution state: SetupState, fixture caches, stdout/stderr buffers and log handlers.
+  - **P1–P3 helpers:** `_SetupStateRouter`, `_patch_fixturedef`, `_LogDispatch` / `_LogRouter`, and `_LaneStream`.
+  - **`pytest_configure`:** chooses the mode.
+    - `config.workerinput` present means the hybrid worker, handled by `LanesSession(worker_mode=True)`.
+    - `-n` or `--tx` means the hybrid controller, handled by `LanesController`.
+    - Otherwise it is single-process `LanesSession`.
+  - **`LanesSession`:** installs and uninstalls the touchpoints, captures per phase, builds the scheduler (`_make_scheduler` calls xdist's own factory hook), runs `_node_loop` (a copy of xdist's `WorkerInteractor` loop), runs `_pump` (the main-thread event loop), and contains `_worker_runtestloop` for hybrid workers.
+  - **`LaneMux`, `LaneProxy`, `LanesController`:** the hybrid controller side. The mux wraps the user's scheduler, presenting P real workers to xdist's `DSession` and P×M virtual lanes to the scheduler.
+  - **`_RWLock`:** makes exclusive tests (capsys, capfd, recwarn, or the `lanes_exclusive` mark) run alone within their process.
+- `tests/test_contract.py` holds 15 pytester subprocess tests. These are the spec.
+- `demo/` is a manual smoke test (see `demo/README.md`).
+- `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
+- `.github/workflows/ci.yml` is a draft CI workflow. It has never been run.
+
+## Internal touchpoints (all probed)
+
+| # | Touchpoint | Purpose |
+|---|---|---|
+| P1 | `session._setupstate` | Router giving each lane its own `SetupState` |
+| P2 | `FixtureDef.cached_result` / `._finalizers` | Class-level properties keyed per lane |
+| P3 | `LoggingPlugin.caplog_handler` / `.report_handler` | Per-lane dispatch; a permanent root `_LogRouter` makes pytest's concurrent handler attach/detach harmless |
+| P4 | pluggy `PluginManager._inner_hookexec` | Routes the 4 controller hooks to the main thread (the same slot pluggy's public `add_hookcall_monitoring` uses) |
+| P5 | `item._nodeid` | `@group` suffix under loadgroup, identical to xdist's worker |
+| P6 | `_pytest.runner._update_current_test_var` | pytest pops `PYTEST_CURRENT_TEST` without a default, so lanes finishing together raised KeyError (3 of 1,000) |
+| X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
+| X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
+| X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
+
+## How to run
+
+```bash
+pip install -e ".[test]"
+python -m pytest tests -q -p no:cacheprovider -p no:warnings      # 15 tests, about 20s
+scripts/matrix.sh                                                  # version matrix (needs PyPI)
+```
+
+Required flags and environment:
+
+- On Python 3.13 or earlier, `-p no:warnings` is mandatory, because `catch_warnings` is not thread-safe there and the plugin refuses to run otherwise. On Python 3.14 or later, use `-X context_aware_warnings=1` instead.
+- pytest 8.3.5 and earlier also need `-p no:threadexception -p no:unraisableexception`, because those versions swap global hooks per test. `tests/` adds these flags automatically when needed.
+- Tests use `runpytest_subprocess`. Keep it that way: in-process pytester would share the patched `FixtureDef` class and the global hooks.
+
+## Verified status (Python 3.12, 1-core sandbox)
+
+- **All 15 tests pass** on pytest 8.0.2, 8.3.5 and 9.1.1, with xdist 3.6.1 and 3.8.0.
+- **Scheduling:** the same custom scheduler works under `-n`, `--lanes`, and hybrid. Each environment is pinned to one lane, runs in order, and environments run in parallel.
+- **Report parity:** report-log output is identical to plain xdist loadgroup, in both single-process and hybrid mode.
+- **Crash recovery (hybrid):** a test calling `os._exit` was reported as crashed, xdist replaced the worker, and the work was rescheduled and passed.
+- **Isolation:** per-test stdout, logs and caplog are attributed correctly. `-x` has exact per-lane semantics. rerunfailures works. capsys runs exclusively.
+- **Scale:** 1,000 concurrent 3-second tests took 4.4s and 93 MB as 1 × 1000; 7.4s and 244 MB as 4 × 250; 14.5s and 848 MB as 20 × 50.
+
+## Known issues (see DESIGN.md "Flags")
+
+These are not bugs to "fix" by weakening the invariants.
+
+- **Process-global state** in user tests and infrastructure: `mock.patch`, monkeypatch on shared modules, `os.environ`, `chdir`, signals.
+- **Warnings** before Python 3.14.
+- **Child-thread output attribution** before Python 3.14.
+- **Unkillable hung threads.**
+- **Crash collateral:** every in-flight test in a crashed process is reported as crashed.
+- **Exclusive tests pause their whole process.**
+- **Unsupported:** `each` and `worksteal` modes, and `--pdb`.
+- **Ctrl-C** doesn't interrupt running tests.
+- **One flaky failure,** seen once in about 10 runs on pytest 8.3.5 and never reproduced; probably a wall-clock assertion.
+
+## Backlog, in priority order, with acceptance criteria
+
+1. **Run on the target interpreters.**
+   - Add Python 3.13, 3.14 and 3.14t to the matrix and make it pass.
+   - On 3.14, the warnings probe must accept `-X context_aware_warnings=1`.
+   - Add a contract test proving per-test warning capture and `filterwarnings("error")` work under lanes on 3.14.
+2. **Fix timing flakiness.**
+   - Replace wall-clock assertions (`r.duration < N`) with overlap assertions: record start and end timestamps per test and assert that the expected tests overlapped in time.
+   - The suite must pass 20 times in a row under load.
+3. **Runner-level per-test timeout (F4).**
+   - Add a `--lanes-timeout` option and a `lanes_timeout` marker.
+   - On expiry: report the test failed with a stack dump of that lane's thread; try `PyThreadState_SetAsyncExc` as a best effort; if the thread doesn't return within a grace period, mark the lane dead and abandon it.
+   - Single-process mode: the scheduler must then treat that lane like a crashed node (`remove_node`, then reschedule).
+   - Hybrid mode: optionally exit the worker process so xdist replaces it.
+   - Tests must cover a thread stuck in `time.sleep`, in a blocking socket read, and in a pure-Python loop.
+4. **Context propagation for child threads on Python 3.13 and earlier (F3).**
+   - Opt-in `--lanes-propagate-context`: patch `threading.Thread.start` so the thread runs inside `contextvars.copy_context()` of the starter.
+   - A test must show that stdout, logs and caplog records from a child thread are attributed to the right test.
+5. **Shared-state audit tool (F1).**
+   - A `tools/audit_globals.py` AST scanner that reports `mock.patch`, `monkeypatch.setattr`/`setenv`/`chdir`, `os.environ[...] =`, `os.chdir`, `signal.signal`, `sys.path` mutation, `logging` level changes, and module-level mutable globals written from functions.
+   - Output a CSV with file, line, pattern and a suggested action (`lanes_exclusive`, refactor, or safe).
+   - Run it on the user's repo and hand over the report. Do not auto-edit the user's tests.
+6. **Crash collateral (F5).** In hybrid mode, annotate sibling-lane crash reports as collateral. Use the `pytest_handlecrashitem` hook or a report attribute, so dashboards can tell the culprit from the victims. Parity must be kept for the culprit's report.
+7. **worksteal support.** Implement `send_steal` and the unscheduled round trip for `ThreadNode`, and for `LaneProxy` via a new `lanes_steal` command. Add a contract test with a worksteal parity check.
+8. **User's failure-instrumentation plugin.**
+   - Ask the user for its location.
+   - Classify each of its hookimpls: A (report consumer), B (xdist observer), C (process protocol), or D (execution-side).
+   - Add a contract test that loads it under all three modes and diffs its output against plain `-n`.
+   - For class D, fix it by moving any "current test" global to `item.stash` or a contextvar.
+9. **CI.** Make `.github/workflows/ci.yml` actually run, including the nightly job against pytest and xdist `main`. If the user's environment is air-gapped, adapt `scripts/matrix.sh` to a local package index instead.
+10. **Upstream.** Draft two issues:
+    - pytest: `PYTEST_CURRENT_TEST` should use `pop(..., None)`, plus a public API for per-context SetupState and fixture caches, to remove P1, P2 and P6.
+    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X3. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers.
+
+## Working rules
+
+- Run `tests/` on at least two pytest versions before declaring anything done.
+- When a plugin misbehaves under lanes, write the failing contract test first, then fix it.
+- Keep `plugin.py` free of new internal touchpoints unless unavoidable (see invariant 3).
+- Never set `report.node` to a `ThreadNode` in hybrid worker mode, because reports must stay serializable. Use `report.lane_id` instead.
+- In hybrid mode, `--lanes` means lanes per process; the total is `-n` × `--lanes`. Don't change this silently.
+- Don't reintroduce a fork of pytest-threadpool. DESIGN.md explains why.
+
+## Questions to ask the user before starting backlog items 3–8
+
+1. Which Python version and build does the real suite run on (3.12, 3.13, 3.14, or free-threaded 3.14t)?
+2. Where is the failure-instrumentation plugin, and which hooks does it implement?
+3. Is the environment derivable from the nodeid (a parametrize id), or does it come from a fixture or runtime lookup? If the latter, surface it via `ids=` or a `tryfirst` `xdist_group` mark.
+4. Is CI air-gapped?
