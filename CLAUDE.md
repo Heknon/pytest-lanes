@@ -36,22 +36,37 @@ Any change that breaks one of these is a regression.
 
 ## File map
 
-- `src/pytest_lanes/plugin.py` holds everything, about 800 lines, in these sections:
-  - **`ThreadNode`:** a lane. It is an xdist WorkerController look-alike that also owns per-lane execution state: SetupState, fixture caches, stdout/stderr buffers and log handlers.
-  - **P1–P3 helpers:** `_SetupStateRouter`, `_patch_fixturedef`, `_LogDispatch` / `_LogRouter`, and `_LaneStream`.
-  - **`pytest_configure`:** chooses the mode.
-    - `config.workerinput` present means the hybrid worker, handled by `LanesSession(worker_mode=True)`.
-    - `-n` or `--tx` means the hybrid controller, handled by `LanesController`.
-    - Otherwise it is single-process `LanesSession`.
-  - **`LanesSession`:** installs and uninstalls the touchpoints, captures per phase, builds the scheduler (`_make_scheduler` calls xdist's own factory hook), runs `_node_loop` (a copy of xdist's `WorkerInteractor` loop), runs `_pump` (the main-thread event loop), and contains `_worker_runtestloop` for hybrid workers.
-  - **`LaneMux`, `LaneProxy`, `LanesController`:** the hybrid controller side. The mux wraps the user's scheduler, presenting P real workers to xdist's `DSession` and P×M virtual lanes to the scheduler.
-  - **`_RWLock`:** makes exclusive tests (capsys, capfd, recwarn, or the `lanes_exclusive` mark) run alone within their process.
+The package is split by responsibility. Read `plugin.py`'s docstring first: it has the same map.
+
+| Module | What it holds | Touchpoints |
+|---|---|---|
+| `plugin.py` | Entry point: options, and `pytest_configure` choosing the mode. No logic (pytest registers it as a plugin, so any `pytest_*` name here is a hook) | |
+| `lane.py` | `ThreadNode`, one lane: an xdist WorkerController look-alike that also owns its private SetupState, fixture caches, output buffers and log handlers. The `LANE` contextvar | |
+| `runner.py` | `LaneRunner`, the base of both test-running sessions: session-long install/uninstall, per-phase capture, the lane loop (`_node_loop`, a copy of xdist's `WorkerInteractor` loop), the main-thread pump (`_pump`), and `ReadWriteLock` for exclusive tests | |
+| `single.py` | `SingleProcessSession` (`--lanes N`): plays xdist's DSession on the main thread, then runs exclusive tests on `ln-serial` | |
+| `worker.py` | `HybridWorkerSession` (a worker of `-n P --lanes M`): takes over xdist's worker loop and channel | X2 |
+| `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler | X3 |
+| `scheduling.py` | `make_scheduler` (via xdist's own factory hook), the scheduler protocol check, the loadgroup `@group` suffix | X1, P5 |
+| `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7 |
+| `capture.py` | Per-lane stdout/stderr and logging | P3 |
+| `hookrouting.py` | `ControllerHookRouter`: the 4 controller hooks queued on lanes and replayed on the main thread | P4 |
+| `probes.py` | Fail-closed startup checks, one function per touchpoint | all except P1, P5 |
+
+Mode selection in `pytest_configure`:
+- `config.workerinput` present: hybrid worker, `HybridWorkerSession`.
+- `-n` or `--tx`: hybrid controller, `LanesController`.
+- Otherwise: `SingleProcessSession`.
+
+Other files:
+
 - `tests/test_contract.py` holds 18 pytester subprocess tests. These are the spec.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is a draft CI workflow. It has never been run.
 
-## Internal touchpoints (all probed)
+## Internal touchpoints
+
+All are probed at startup (`probes.py`) except P1 and P5, which only the contract tests cover. That gap predates the module split; closing it is a candidate follow-up.
 
 | # | Touchpoint | Purpose |
 |---|---|---|
@@ -146,7 +161,8 @@ These are not bugs to "fix" by weakening the invariants.
 
 - Run `tests/` on at least two pytest versions before declaring anything done.
 - When a plugin misbehaves under lanes, write the failing contract test first, then fix it.
-- Keep `plugin.py` free of new internal touchpoints unless unavoidable (see invariant 3).
+- Add no new internal touchpoints unless unavoidable (see invariant 3). A new one goes in the module that owns its concern, with its check in `probes.py`.
+- Keep `plugin.py` free of logic, and keep each touchpoint's patch and restore together in one context manager.
 - Never set `report.node` to a `ThreadNode` in hybrid worker mode, because reports must stay serializable. Use `report.lane_id` instead.
 - In hybrid mode, `--lanes` means lanes per process; the total is `-n` × `--lanes`. Don't change this silently.
 - Don't reintroduce a fork of pytest-threadpool. DESIGN.md explains why.

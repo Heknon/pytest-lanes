@@ -44,7 +44,7 @@ The result is that process-level xdist protocol plugins (pytest-cov, pytest-meta
 
 ## Private touchpoints
 
-Every touchpoint is probed at startup, and the plugin fails closed if a probe fails.
+Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if a probe fails. P1 and P5 have no startup probe yet; the contract tests cover them. Each patch lives in the module named in CLAUDE.md's file map, with its install and restore in one context manager.
 
 | # | Touchpoint | Why |
 |---|---|---|

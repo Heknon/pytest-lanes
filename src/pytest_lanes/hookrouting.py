@@ -1,0 +1,73 @@
+"""Route controller-side hooks from lanes to the main thread (touchpoint P4).
+
+xdist runs every hook in the worker, except four that it forwards to the
+controller: the ``ROUTED`` set below. Lanes keep exactly that split. When one of
+these hooks is called on a lane, it is queued as a ``HookCall`` instead of run,
+and the main thread replays it in order. Reporters (terminal, junitxml,
+report-log, ...) therefore see one thread and a well-ordered stream, as they
+would on an xdist controller.
+
+The hook call is intercepted at pluggy's ``PluginManager._inner_hookexec``, the
+same slot that pluggy's public ``add_hookcall_monitoring`` wraps.
+"""
+from __future__ import annotations
+
+from typing import NamedTuple
+
+from .lane import LANE
+
+#: Exactly the hooks xdist forwards worker -> controller.
+ROUTED = frozenset({
+    "pytest_runtest_logstart",
+    "pytest_runtest_logreport",
+    "pytest_runtest_logfinish",
+    "pytest_warning_recorded",
+})
+
+
+class HookCall(NamedTuple):
+    name: str
+    impls: list
+    kwargs: dict
+    firstresult: bool
+
+
+class ControllerHookRouter:
+    """Context manager that installs the interception; ``replay()`` runs a queued call.
+
+    ``set_report_node``: in single-process mode ``report.node`` is set to the lane,
+    as xdist's controller sets it to the worker. A hybrid worker must not set it,
+    because its reports are serialized to the controller; ``report.lane_id`` (a
+    string) is set in both modes.
+    """
+
+    def __init__(self, pluginmanager, events, *, set_report_node: bool) -> None:
+        self._pm = pluginmanager
+        self._events = events
+        self._set_report_node = set_report_node
+        self._inner = None
+
+    def __enter__(self):
+        self._inner = inner = self._pm._inner_hookexec
+        events, set_report_node = self._events, self._set_report_node
+
+        def hookexec(name, impls, kwargs, firstresult):
+            lane = LANE.get()
+            if lane is None or name not in ROUTED:
+                return inner(name, impls, kwargs, firstresult)
+            if name == "pytest_runtest_logreport":
+                report = kwargs["report"]
+                report.lane_id = lane.gateway.id
+                if set_report_node:
+                    report.node = lane
+            events.put(HookCall(name, impls, kwargs, firstresult))
+            return None if firstresult else []
+
+        self._pm._inner_hookexec = hookexec
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._pm._inner_hookexec = self._inner
+
+    def replay(self, call: HookCall):
+        return self._inner(*call)
