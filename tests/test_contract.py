@@ -197,7 +197,7 @@ def test_tmp_path_basetemp_created_once_across_lanes(pytester):
     """)
     r = run(pytester, "--lanes", "32", f"--basetemp={pytester.path / 'bt'}")
     r.assert_outcomes(passed=32)
-    assert len(list((pytester.path / "bt").glob("test_t_*_0/f"))) == 32
+    assert len(list((pytester.path / "bt").glob("ln*/test_t_*_0/f"))) == 32   # per-lane basetemps
 
 
 def test_current_test_env_var_survives_concurrent_teardown(pytester):

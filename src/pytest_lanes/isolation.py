@@ -8,7 +8,7 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P1 ``session._setupstate``: one SetupState per lane.
 * P2 ``FixtureDef.cached_result`` / ``_finalizers``: fixture caches per lane.
 * P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
-* P7 ``config._tmp_path_factory.getbasetemp``: basetemp creation race.
+* P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
 * P3 and P8 (logging) live in ``capture.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
@@ -17,6 +17,7 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import threading
 from dataclasses import dataclass
@@ -121,26 +122,82 @@ def race_free_current_test_var():
 
 
 # ------------------------------------------------------------ P7: basetemp
+class _TempPathFactoryRouter:
+    """Replaces ``config._tmp_path_factory``; forwards to the current lane's own factory.
+
+    xdist gives every worker its own basetemp (``<root>/popen-gwN``), so a
+    per-worker session fixture may, for example, ``mktemp("db", numbered=False)``,
+    while ``getbasetemp().parent`` is the run's root, shared by all workers (the
+    xdist-documented place for cross-worker files and locks). Each lane gets the
+    same shape, created lazily on first use like pytest's own:
+
+    * single process, whose basetemp is the root: ``<root>/ln3``;
+    * hybrid worker, whose basetemp is ``<root>/popen-gw0``: ``<root>/popen-gw0.ln3``.
+    """
+
+    def __init__(self, main, in_worker: bool) -> None:
+        object.__setattr__(self, "_main", main)
+        object.__setattr__(self, "_in_worker", in_worker)
+
+    def _target(self):
+        lane = LANE.get()
+        if lane is None:
+            return self._main
+        if lane.tmp_path_factory is None:
+            lane.tmp_path_factory = _lane_factory(self._main, lane.gateway.id, self._in_worker)
+        return lane.tmp_path_factory
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._target(), name, value)
+
+
+def _lane_factory(main, lane_id: str, in_worker: bool):
+    process_base = main.getbasetemp()
+    if in_worker:   # lane_id "gw0.ln3" -> sibling of popen-gw0: popen-gw0.ln3
+        given = process_base.parent / f"{process_base.name}.{lane_id.rsplit('.', 1)[-1]}"
+    else:
+        given = process_base / lane_id
+    factory = copy.copy(main)
+    factory.__dict__.pop("getbasetemp", None)          # the process-level lock wrapper
+    factory._given_basetemp = given
+    factory._basetemp = None
+    return factory
+
+
 @contextlib.contextmanager
-def locked_basetemp(config):
-    """pytest creates basetemp lazily and without a lock. With --basetemp (always set
-    on xdist workers), two lanes' first tmp_path both rmtree+mkdir it. Serialize it
-    on this run's factory instance; creation stays lazy and exactly as pytest does it."""
-    tpf = getattr(config, "_tmp_path_factory", None)  # absent under -p no:tmpdir
-    if tpf is None:
+def per_lane_basetemp(config):
+    """Route tmp_path/tmp_path_factory (and legacy tmpdir_factory) to per-lane factories.
+
+    The process's own basetemp is still created lazily, and pytest creates it
+    without a lock: with --basetemp (always set on xdist workers) two lanes' first
+    use both rmtree+mkdir it. So its getbasetemp is serialized.
+    """
+    main = getattr(config, "_tmp_path_factory", None)   # absent under -p no:tmpdir
+    if main is None:
         yield
         return
-    unlocked, lock = tpf.getbasetemp, threading.Lock()
+    unlocked, lock = main.getbasetemp, threading.Lock()
 
     def getbasetemp():
         with lock:
             return unlocked()
 
-    tpf.getbasetemp = getbasetemp
+    main.getbasetemp = getbasetemp
+    router = _TempPathFactoryRouter(main, in_worker=hasattr(config, "workerinput"))
+    config._tmp_path_factory = router
+    legacy = getattr(config, "_tmpdirhandler", None)    # pytest's legacypath plugin
+    if legacy is not None:
+        legacy._tmppath_factory = router
     try:
         yield
     finally:
-        tpf.__dict__.pop("getbasetemp", None)
+        config._tmp_path_factory = main
+        if legacy is not None:
+            legacy._tmppath_factory = main
+        main.__dict__.pop("getbasetemp", None)
 
 
 # ------------------------------------------------------------ all together
@@ -164,7 +221,7 @@ def isolate_lanes(config, session):
     patch_fixturedef()                                                   # P2
     with contextlib.ExitStack() as stack:
         stack.enter_context(race_free_current_test_var())                # P6
-        stack.enter_context(locked_basetemp(config))                     # P7
+        stack.enter_context(per_lane_basetemp(config))                   # P7
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
         stack.enter_context(snapshot_logger_dict())                       # P8

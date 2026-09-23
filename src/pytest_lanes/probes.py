@@ -75,8 +75,12 @@ def _p7_basetemp(config):
     if config.pluginmanager.get_plugin("tmpdir") is None:
         return None
     tpf = getattr(config, "_tmp_path_factory", None)
-    if tpf is None or not callable(getattr(tpf, "getbasetemp", None)) or not hasattr(tpf, "__dict__"):
-        return "P7 config._tmp_path_factory.getbasetemp"
+    if tpf is None or not callable(getattr(tpf, "getbasetemp", None)) or not hasattr(tpf, "__dict__") \
+            or not {"_given_basetemp", "_basetemp"} <= set(vars(tpf)):
+        return "P7 config._tmp_path_factory (getbasetemp, _given_basetemp, _basetemp)"
+    legacy = getattr(config, "_tmpdirhandler", None)
+    if legacy is not None and "_tmppath_factory" not in vars(legacy):
+        return "P7 config._tmpdirhandler._tmppath_factory"
     return None
 
 

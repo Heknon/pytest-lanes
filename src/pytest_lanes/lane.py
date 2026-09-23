@@ -6,7 +6,8 @@
   ``load*`` schedulers use: ``gateway``, ``shutting_down``,
   ``send_runtest_some()`` and ``shutdown()``;
 * toward test execution, the state a worker process would own privately: its
-  ``SetupState``, fixture caches, captured stdout/stderr and log handlers.
+  ``SetupState``, fixture caches, captured stdout/stderr, log handlers and
+  basetemp.
 
 Code running on a lane finds its node through the ``LANE`` contextvar. On the
 main thread, ``LANE.get()`` is ``None``, and everything behaves as plain pytest.
@@ -59,6 +60,7 @@ class ThreadNode:
         self.out = io.StringIO()
         self.err = io.StringIO()
         self.log_handlers = log_handlers
+        self.tmp_path_factory = None  # this lane's basetemp, created on first use (isolation.py)
 
     def send_runtest_some(self, indices) -> None:
         for i in indices:

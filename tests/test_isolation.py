@@ -140,6 +140,24 @@ def test_session_fixture_can_use_fixed_name_temp_dir(pytester, name):
     run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=6)
 
 
+@pytest.mark.parametrize("name", MODES.keys())
+def test_basetemp_parent_is_shared_by_all_workers(pytester, monkeypatch, name):
+    # xdist documents getbasetemp().parent as the directory shared by every worker
+    # of a run (for cross-worker files and locks). It must stay so for lanes.
+    monkeypatch.setenv("LANES_OUT", str(pytester.path))
+    pytester.makepyfile("""
+        import os, pathlib, time, pytest
+        @pytest.mark.parametrize("i", range(6))
+        def test_t(i, tmp_path_factory):
+            time.sleep(0.05)
+            out = pathlib.Path(os.environ["LANES_OUT"])
+            (out / f"parent-{i}").write_text(str(tmp_path_factory.getbasetemp().parent))
+    """)
+    run(pytester, *MODES[name], f"--basetemp={pytester.path / 'bt'}", timeout=60).assert_outcomes(passed=6)
+    parents = {(pytester.path / f"parent-{i}").read_text() for i in range(6)}
+    assert parents == {str(pytester.path / "bt")}, parents
+
+
 @pytest.mark.parametrize("mode", ONE_PROCESS.values(), ids=ONE_PROCESS.keys())
 def test_each_lane_has_its_own_basetemp(pytester, monkeypatch, mode):
     pytester.makeconftest(BARRIER)
