@@ -1,6 +1,8 @@
-# UNTESTED: written alongside the prototype; verify on first run.
+# Manual only: GitHub runners are paid. Run the contract suite locally with
+# scripts/matrix.sh; dispatch this workflow deliberately (backlog item 9).
 name: contract
-on: [push, pull_request]
+on:
+  workflow_dispatch:
 jobs:
   matrix:
     runs-on: ubuntu-latest

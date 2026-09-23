@@ -171,6 +171,8 @@ These are not bugs to "fix" by weakening the invariants.
 
 ## Working rules
 
+- **Test locally, not on GitHub runners: they are paid.** `scripts/matrix.sh` is the gate. `.github/workflows/ci.yml` runs only when dispatched by hand; don't add `push`/`pull_request` triggers without asking.
+
 - Run `tests/` on at least two pytest versions before declaring anything done.
 - When a plugin misbehaves under lanes, write the failing contract test first, then fix it.
 - Add no new internal touchpoints unless unavoidable (see invariant 3). A new one goes in the module that owns its concern, with its check in `probes.py`.
