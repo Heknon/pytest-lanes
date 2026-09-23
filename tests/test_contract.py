@@ -1,20 +1,8 @@
 """Contract tests: lanes must look like xdist --dist loadgroup to consumers."""
 import sys
+
 import pytest
-
-pytest_plugins = ["pytester"]
-BASE = ["-p", "no:warnings", "-p", "no:cacheprovider", "-p", "no:randomly"]
-
-import _pytest.threadexception as _te
-import _pytest.unraisableexception as _ue
-if not hasattr(_te, "pytest_configure"):     # older pytest: per-test global hook swapping
-    BASE += ["-p", "no:threadexception"]
-if not hasattr(_ue, "pytest_configure"):
-    BASE += ["-p", "no:unraisableexception"]
-
-
-def run(pytester, *args):
-    return pytester.runpytest_subprocess(*BASE, *args)
+from lanes_testing import BASE, run
 
 
 def test_groups_serial_across_parallel(pytester):
