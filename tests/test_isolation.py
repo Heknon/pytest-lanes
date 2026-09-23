@@ -176,3 +176,47 @@ def test_each_lane_has_its_own_basetemp(pytester, monkeypatch, mode):
     run(pytester, *mode, f"--basetemp={pytester.path / 'bt'}", timeout=60).assert_outcomes(passed=3)
     bases = {(pytester.path / f"base-{i}").read_text() for i in range(3)}
     assert len(bases) == 3, bases
+
+
+IDENTITY_TESTS = """
+import json, os, pathlib, pytest, xdist
+from conftest import together
+@pytest.mark.parametrize("i", range(3))
+def test_id(i, request, worker_id, testrun_uid):
+    together()
+    ident = {"worker_id": worker_id, "api": xdist.get_xdist_worker_id(request),
+             "is_worker": xdist.is_xdist_worker(request),
+             "workerinput": request.config.workerinput["workerid"],
+             "count": request.config.workerinput["workercount"], "uid": testrun_uid}
+    (pathlib.Path(os.environ["LANES_OUT"]) / f"id-{i}.json").write_text(json.dumps(ident))
+"""
+IDENTITY_CONFTEST = BARRIER + """
+def pytest_sessionfinish(session):
+    if os.environ.get("LANES_MAIN_ROLE"):     # the main thread keeps the controller role
+        (__import__("pathlib").Path(os.environ["LANES_OUT"]) / "main-role").write_text(
+            str(hasattr(session.config, "workerinput")))
+"""
+
+
+@pytest.mark.parametrize("mode,expected", [
+    (["--lanes", "3"], {"ln0", "ln1", "ln2"}),
+    (["-n", "1", "--lanes", "3"], {"gw0.ln0", "gw0.ln1", "gw0.ln2"}),
+], ids=["lanes", "hybrid"])
+def test_each_lane_is_its_own_xdist_worker(pytester, monkeypatch, mode, expected):
+    # Suites name per-worker resources (databases, ports, dirs) after worker_id.
+    # Concurrent lanes must therefore see distinct ids, through every xdist API.
+    import json
+    pytester.makeconftest(IDENTITY_CONFTEST)
+    pytester.makepyfile(IDENTITY_TESTS)
+    monkeypatch.setenv("LANES_BARRIER", "3")
+    monkeypatch.setenv("LANES_OUT", str(pytester.path))
+    monkeypatch.setenv("LANES_MAIN_ROLE", "1" if mode[0] == "--lanes" else "")
+    run(pytester, *mode, timeout=60).assert_outcomes(passed=3)
+    idents = [json.loads((pytester.path / f"id-{i}.json").read_text()) for i in range(3)]
+    assert {d["worker_id"] for d in idents} == expected, idents
+    for d in idents:
+        assert d["worker_id"] == d["api"] == d["workerinput"] and d["is_worker"], d
+        assert d["count"] == 3, d
+    assert len({d["uid"] for d in idents}) == 1, idents        # one test run
+    if mode[0] == "--lanes":
+        assert (pytester.path / "main-role").read_text() == "False"
