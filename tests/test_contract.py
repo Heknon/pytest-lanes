@@ -154,6 +154,32 @@ def test_fail_closed_on_unsafe_warnings(pytester):
     r.stderr.fnmatch_lines(["*refuses to run*", "*context_aware_warnings*"])
 
 
+def test_tmp_path_basetemp_created_once_across_lanes(pytester):
+    # pytest creates basetemp lazily, without a lock. With --basetemp (which xdist always
+    # sets on workers) the first tmp_path of two lanes could both rmtree+mkdir it.
+    pytester.makepyfile("""
+        import pytest
+        @pytest.mark.parametrize("i", range(32))
+        def test_t(i, tmp_path):
+            (tmp_path / "f").write_text(str(i))
+    """)
+    r = run(pytester, "--lanes", "32", f"--basetemp={pytester.path / 'bt'}")
+    r.assert_outcomes(passed=32)
+    assert len(list((pytester.path / "bt").glob("test_t_*_0/f"))) == 32
+
+
+def test_current_test_env_var_survives_concurrent_teardown(pytester):
+    # os.environ.pop(k, None) is check-then-delete (MutableMapping.pop), so two lanes
+    # finishing together could still raise KeyError: 'PYTEST_CURRENT_TEST' (P6).
+    pytester.makepyfile("""
+        import pytest
+        @pytest.mark.parametrize("i", range(600))
+        def test_t(i): pass
+    """)
+    r = run(pytester, "--lanes", "32")
+    r.assert_outcomes(passed=600)
+
+
 def test_capfd_routed_to_serial_phase(pytester):
     pytester.makepyfile(
         """
