@@ -10,6 +10,17 @@ from __future__ import annotations
 import pytest
 
 SUPPORTED_DIST = ("load", "loadscope", "loadfile", "loadgroup")
+
+
+def builtin_dist(config) -> str:
+    """The built-in scheduler to fall back to: --lanes-dist, else xdist's --dist, else load."""
+    dist = config.getoption("lanes_dist") or config.getoption("dist", "no")
+    if dist in (None, "no"):
+        return "load"
+    if dist not in SUPPORTED_DIST:
+        raise pytest.UsageError(f"--dist {dist} is not supported by lanes "
+                                f"(supported: {', '.join(SUPPORTED_DIST)})")
+    return dist
 UNSUPPORTED_SCHEDULERS = ("EachScheduling", "WorkStealingScheduling")
 
 #: X1: what lanes call on a scheduler. Probed on each instance, never by import
@@ -44,7 +55,7 @@ def make_scheduler(config, numnodes: int):
         log = Producer("lanessched", enabled=False)
         sched = config.hook.pytest_xdist_make_scheduler(config=config, log=log)
         if sched is None:
-            sched = builtin[config.getoption("lanes_dist")](config, log)
+            sched = builtin[builtin_dist(config)](config, log)
     finally:
         opt.tx = saved
 

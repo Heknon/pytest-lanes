@@ -40,9 +40,10 @@ def pytest_addoption(parser):
     g = parser.getgroup("lanes")
     g.addoption("--lanes", type=int, default=None, metavar="N",
                 help="run tests on N thread lanes in this process, scheduled by pytest-xdist schedulers")
-    g.addoption("--lanes-dist", default="load", choices=SUPPORTED_DIST,
-                help="built-in xdist scheduler to use when no pytest_xdist_make_scheduler "
-                     "implementation returns one (default: load, like xdist)")
+    g.addoption("--lanes-dist", default=None, choices=SUPPORTED_DIST,
+                help="built-in xdist scheduler for single-process mode when no "
+                     "pytest_xdist_make_scheduler implementation returns one "
+                     "(default: xdist's --dist if given, else load)")
     g.addoption("--lanes-xdist-node-hooks", action="store_true", default=False,
                 help="fire xdist node hooks (testnodeready/down) to plugins in lanes_node_hook_plugins")
     parser.addini("lanes_node_hook_plugins", "plugin names (substring match) that receive xdist "
@@ -62,7 +63,10 @@ def pytest_load_initial_conftests(early_config, parser, args):
 @pytest.hookimpl(trylast=True)  # after builtins configure (the P7 probe needs tmpdir's factory)
 def pytest_configure(config):
     config.addinivalue_line("markers", "lanes_exclusive: run in the serial phase, alone")
-    if not config.getoption("lanes"):
+    lanes = config.getoption("lanes")
+    if lanes is not None and lanes < 0:
+        raise pytest.UsageError(f"--lanes must be 0 (off) or a positive number of lanes, not {lanes}")
+    if not lanes:
         return
     if not config.pluginmanager.hasplugin("xdist"):
         raise pytest.UsageError("--lanes drives pytest-xdist's schedulers; install pytest-xdist")
@@ -79,5 +83,7 @@ def pytest_configure(config):
         check_controller_touchpoints(config)
         pm.register(LanesController(config), "lanes-controller")
     else:
+        if getattr(config.option, "trace", False):
+            raise pytest.UsageError("--lanes is incompatible with --trace: pdb would block a lane")
         check_touchpoints(config)
         pm.register(SingleProcessSession(config), "lanes-session")

@@ -183,7 +183,7 @@ def test_dist_option_is_honoured_in_single_process_mode(pytester):
         def test_t(): pass
     """)
     r = run(pytester, "--lanes", "2", "--dist", "loadgroup", "-v", timeout=60)
-    r.stdout.fnmatch_lines(["*test_t@g PASSED*"])
+    r.stdout.fnmatch_lines(["*PASSED*::test_t@g*"])
 
 
 @pytest.mark.parametrize("dist", ["each", "worksteal"])

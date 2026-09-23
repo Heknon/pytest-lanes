@@ -55,7 +55,7 @@ def pytest_xdist_make_scheduler(config, log):
 ```
 
 Tests in one scope run sequentially, in order, on one lane; different scopes run in parallel. Without a custom scheduler, choose a built-in one:
-- Single-process mode: `--lanes-dist load|loadscope|loadfile|loadgroup` (default `load`).
+- Single-process mode: `--dist` as with xdist, or `--lanes-dist load|loadscope|loadfile|loadgroup` (default `load`).
 - Hybrid mode: xdist's own `--dist`.
 
 `each` and `worksteal` are not supported yet.
@@ -64,8 +64,8 @@ Tests in one scope run sequentially, in order, on one lane; different scopes run
 
 | Option / ini / marker | Meaning |
 |---|---|
-| `--lanes N` | N lanes in this process. In hybrid mode, N lanes *per xdist process*, so the total is `-n` × `--lanes` |
-| `--lanes-dist MODE` | Built-in scheduler for single-process mode, when no `pytest_xdist_make_scheduler` returns one |
+| `--lanes N` | N lanes in this process. In hybrid mode, N lanes *per xdist process*, so the total is `-n` × `--lanes`. `--lanes 0` turns lanes off |
+| `--lanes-dist MODE` | Built-in scheduler for single-process mode, when no `pytest_xdist_make_scheduler` returns one. Defaults to xdist's `--dist` if given, else `load` |
 | `@pytest.mark.lanes_exclusive` | Run this test alone within its process. Doctests always are, since doctest swaps `sys.stdout` for the whole process |
 | ini `lanes_exclusive_fixtures` | Fixtures that make a test exclusive. Default: capsys, capsysbinary, capfd, capfdbinary, capteesys, recwarn. Requesting one at run time (`request.getfixturevalue`) from a test that is not exclusive fails that test with instructions |
 | `-s` / `--capture=no` | As under xdist: test output goes straight to the terminal. Log records are still captured per test |
@@ -79,7 +79,7 @@ Lanes are threads, so anything process-global is shared between concurrently run
 - A hung thread cannot be killed.
 - A crash takes down every lane in its process.
 - Output from threads your tests start is attributed to the test only on Python 3.14 with `-X thread_inherit_context=1`.
-- `--pdb` is unsupported, as it is under xdist.
+- `--pdb` is unsupported, as it is under xdist. So is `--trace` in single-process mode.
 
 The full list, with workarounds, is in [DESIGN.md → Flags](DESIGN.md#flags-no-complete-fix).
 

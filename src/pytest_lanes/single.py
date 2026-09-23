@@ -32,8 +32,9 @@ class SingleProcessSession(LaneRunner):
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtestloop(self, session):
-        if session.testsfailed and not session.config.option.continue_on_collection_errors:
-            raise session.Interrupted(f"{session.testsfailed} errors during collection")
+        # Collection errors do not stop the run here, as they do not under xdist:
+        # the other tests run and the run fails (exit 1). With -x, the collection
+        # error already set session.shouldfail, so the lanes stop at once.
         if session.config.option.collectonly:
             return True
 
