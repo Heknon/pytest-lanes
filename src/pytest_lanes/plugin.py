@@ -18,6 +18,7 @@ Module map:
     isolation.py     per-lane pytest state (touchpoints P1, P2, P6, P7)
     capture.py       per-lane stdout/stderr and logging (P3)
     hookrouting.py   the 4 controller hooks replayed on the main thread (P4)
+    compat.py        shims for third-party plugins that assume one test per process (C1)
     probes.py        fail-closed startup checks of every internal we touch
 
 This module must stay free of logic: pytest registers it as a plugin, so any

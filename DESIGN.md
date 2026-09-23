@@ -57,6 +57,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P7 | `config._tmp_path_factory` / `_tmpdirhandler` | A basetemp per lane, like xdist's per-worker basetemp; the process's basetemp is created under a lock |
 | P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it at every test phase; views are served from a copy so concurrent logger creation cannot break that |
 | P9 | `_pytest.doctest.DoctestItem` | Doctests run exclusively, because doctest swaps `sys.stdout` for the whole process |
+| C1 | pytest-rerunfailures `ClientStatusDB` | Hybrid only; its one per-worker socket is serialized across lanes |
 | X1 | xdist scheduler protocol | Semi-public; probed on each scheduler instance |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
@@ -86,6 +87,27 @@ The 15-test suite had only ever run on a 1-core sandbox. On a 4-core container i
 1. **basetemp creation race (new touchpoint P7).** `TempPathFactory.getbasetemp()` creates the base temp directory on first use, without a lock. With `--basetemp`, which xdist always sets on its workers, two lanes that request `tmp_path` or `tmp_path_factory` at the same time both `rm_rf` and `mkdir` it, and one fails with `FileExistsError`. It affects single-process lanes as well. The fix wraps `getbasetemp` on the process's factory instance with a lock, so creation stays lazy and exactly as pytest does it. The probe needs `config._tmp_path_factory` to exist, so lanes' `pytest_configure` is now `trylast` (after the builtin tmpdir plugin). This was very likely the "unreproduced intermittent failure" from round 1.
 2. **The P6 fix still raced.** `os.environ.pop(key, None)` is `MutableMapping.pop`, which reads the key and then deletes it, so another lane can delete in between. It is now `del os.environ[key]` inside `suppress(KeyError)`. On 3.14t this hit several times per suite run.
 3. **Warnings on 3.14.** With `context_aware_warnings` (the default on 3.14t, `-X context_aware_warnings=1` on 3.14), pytest's own per-test `catch_warnings` works under lanes as-is: `filterwarnings("error")` and `("ignore")` stay inside their test, and `pytest_warning_recorded` output matches `-n`. No plugin change was needed. A contract test proves it, and it fails when the probe is bypassed on a non-context-aware interpreter.
+
+### Found and fixed in round 3 (edge-case sweep)
+
+An adversarial sweep ran about 60 scenarios under `-n`, `--lanes` and hybrid, and compared outcomes, exit codes and report-log. Each confirmed bug got a contract test first (`tests/test_robustness.py`, `test_isolation.py`, `test_parity.py`):
+
+1. **`-x`/`--maxfail` with a failing session-fixture teardown gave INTERNALERROR.** pytest tears the failing test down fully once `session.shouldfail` is set, but that flag is set by `Session.pytest_runtest_logreport`, which lanes replayed later. That implementation now runs on the lane, as in an xdist worker; the exit code is 2, as xdist's.
+2. **pytest ≥ 9 logger race (new touchpoint P8).** `catching_logs` iterates `loggerDict` at every test phase; a logger created on another lane made it raise. Seen on 3.14t, and reproduced 5/5 on 3.12.
+3. **Doctests stole other lanes' output (new touchpoint P9).** doctest swaps `sys.stdout` for the whole process, so doctests now run exclusively.
+4. **Capture:**
+   - `-s` still captured.
+   - Bytes written to `sys.stdout.buffer` escaped capture.
+   - `capsys`/`capfd` requested via `getfixturevalue` ran unguarded. It now fails with instructions.
+5. **Shared basetemp (P7).** A per-lane session fixture could not `mktemp` a fixed name. Each lane now has its own basetemp, and `getbasetemp().parent` is still the run root.
+6. **pytest-rerunfailures ≥ 15 in hybrid mode (new touchpoint C1).** A worker's lanes shared the plugin's one socket to the controller, so exchanges interleaved and a lane died. Found by the version matrix, not the first sweep.
+7. **Options:**
+   - Collection errors aborted single-process runs, whereas xdist runs the rest.
+   - `--trace` hung.
+   - `--lanes -1` gave an unrelated error.
+   - `--dist` was ignored without `-n`.
+
+Verified to match xdist, and now locked in by tests: every outcome kind under all four dist modes (including unittest, doctests, xfail/xpass/strict, setup and teardown errors, and odd parametrize IDs), junitxml, rerunfailures, pytest-html, `--co`/`--setup-*`, empty and deselected runs, lane-count extremes, a lane dying inside the protocol (INTERNALERROR, no hang), `KeyboardInterrupt`, `pytest.exit`, and hybrid restart exhaustion. A 3,000-test × 200-lane stress run on 3.12 and 3.14t produced every report exactly once.
 
 ## Sizing: processes × lanes
 
@@ -133,6 +155,12 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F8 | **Ctrl-C** doesn't interrupt running tests. |
 | F9 | **`--lanes` means lanes per process in hybrid mode.** The total is `-n` × `--lanes`. |
 | F10 | **Wall-clock assertions in `tests/`** are load-sensitive. The round-1 intermittent failure was most likely the P7 basetemp race, now fixed. |
+| F11 | **Worker identity is per process, not per lane.** `worker_id` is `master` for every lane in single-process mode, and every lane of a hybrid worker sees that worker's id, as do `PYTEST_XDIST_WORKER` and `xdist.get_xdist_worker_id`. Resources named after the worker collide between concurrent lanes. Decision pending: see CLAUDE.md. |
+| F12 | **`pytest.warns`, `recwarn` and `warnings.catch_warnings` before Python 3.14** swap process-wide warning state: 5 of 6 concurrent `pytest.warns` blocks failed. On 3.14+ with context-aware warnings they are safe. |
+| F13 | **pytest-timeout in single-process mode** cannot use signals on a lane thread, so it falls back to its thread method, which `os._exit`s the whole process: one timeout ends every lane, with no reports written. `faulthandler_timeout` is silently ineffective under lanes, because the timer is process-wide and every test resets it. Backlog item 3 (`--lanes-timeout`) is the real fix. |
+| F14 | **`signal.signal` in a test raises `ValueError`** under lanes: Python allows it on the main thread only. |
+| F15 | **Worker-side `pytest_runtest_logreport` consumers see reports late.** In xdist a conftest's implementation also runs synchronously in the worker; under lanes it runs only on the main thread, after the test's teardown. For example, a fixture teardown that reads what a conftest `logreport` recorded finds nothing. Use `pytest_runtest_makereport`, which runs on the lane. |
+| F16 | **Per-item overhead on GIL builds.** Each item waits for the main thread to replay its reports. With many CPU-busy lanes the main thread rarely gets the GIL: 3,000 tiny tests took 13s on 1 lane but 108s on 4 lanes and about 200s on 20–200 lanes on 3.12 (7s on 3.14t). It is negligible for long I/O-bound tests. |
 
 ## Compatibility plan
 

@@ -50,6 +50,7 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 | `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7 |
 | `capture.py` | Per-lane stdout/stderr and logging; logging's logger registry made safe to iterate | P3, P8 |
 | `hookrouting.py` | `ControllerHookRouter`: the 4 controller hooks queued on lanes and replayed on the main thread | P4 |
+| `compat.py` | Shims for third-party plugins that assume one test at a time per process | C1 |
 | `probes.py` | Fail-closed startup checks, one function per touchpoint | all except P1, P5 |
 
 Mode selection in `pytest_configure`:
@@ -79,6 +80,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | P7 | `config._tmp_path_factory` (`getbasetemp`, `_given_basetemp`, `_basetemp`), `config._tmpdirhandler._tmppath_factory` | A basetemp per lane, as xdist gives each worker: `<root>/ln3` (single process) or `<root>/popen-gw0.ln3` (hybrid), so `getbasetemp().parent` stays the run root shared by all workers. The process's own basetemp is created under a lock: pytest creates it lazily without one, and with `--basetemp` two lanes both `rmtree`+`mkdir`ed it. Needs lanes' `pytest_configure` to be `trylast` so the probe runs after the tmpdir plugin configures |
 | P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it whenever a test phase starts; a logger created on another lane at that moment raised "dictionary changed size" (reproduced 5/5 on 3.12 with 64 lanes). Replaced for the session by a dict subclass whose views come from an atomic copy |
 | P9 | `_pytest.doctest.DoctestItem` | Doctest items run exclusively: doctest's runner swaps `sys.stdout` for the whole process, which captured other lanes' output and failed the doctest |
+| C1 | pytest-rerunfailures ≥ 15: `config.failures_db` (`ClientStatusDB`) | A hybrid worker's lanes shared its one socket to the controller; interleaved request/response pairs killed a lane with `ValueError`. Its socket methods (`_get`, `_set`, `increment_suite_reruns`) are serialized |
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
@@ -125,6 +127,13 @@ These are not bugs to "fix" by weakening the invariants.
 - **Unsupported:** `each` and `worksteal` modes, and `--pdb`.
 - **Ctrl-C** doesn't interrupt running tests.
 - **Wall-clock assertions** (`r.duration < N`) in `tests/` are load-sensitive (backlog item 2). The earlier unreproduced flake was most likely the P7 basetemp race, which a 1-core box rarely hits.
+- **Round-3 findings still open (DESIGN.md F11–F16):**
+  - worker identity is per process, not per lane;
+  - `pytest.warns`/`catch_warnings` on Python ≤ 3.13;
+  - pytest-timeout kills the whole single-process run, and `faulthandler_timeout` is ineffective;
+  - `signal.signal` fails in lanes;
+  - worker-side `logreport` consumers see reports late;
+  - per-item overhead on GIL builds.
 
 ## Backlog, in priority order, with acceptance criteria
 
