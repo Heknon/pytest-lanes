@@ -146,12 +146,56 @@ def test_node_hooks_opt_in_for_observers(pytester):
     r.stdout.fnmatch_lines(["*SEEN*'down', 'rep', 'up'*"])
 
 
-def test_fail_closed_on_unsafe_warnings(pytester):
-    if getattr(sys.flags, "context_aware_warnings", False):
-        pytest.skip("warnings are context-aware on this interpreter")
+def test_fail_closed_on_unsafe_warnings(pytester, monkeypatch):
+    # Free-threaded 3.14t defaults context_aware_warnings on; force it off (ignored < 3.14).
+    monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "0")
     pytester.makepyfile("def test_a(): pass")
     r = pytester.runpytest_subprocess("-p", "no:cacheprovider", "--lanes", "2")
     r.stderr.fnmatch_lines(["*refuses to run*", "*context_aware_warnings*"])
+
+
+WARN_TESTS = """
+import time, warnings, pytest
+@pytest.mark.parametrize("i", range(3))
+def test_warns(i):
+    time.sleep(0.3)                          # overlap with the filtered tests below
+    warnings.warn(f"w{i}", UserWarning)
+@pytest.mark.filterwarnings("error")
+def test_error():
+    time.sleep(0.2)
+    warnings.warn("boom", UserWarning)       # must fail this test only
+@pytest.mark.filterwarnings("ignore")
+def test_ignored():
+    time.sleep(0.2)
+    warnings.warn("hidden", UserWarning)     # must not be recorded, nor hide the others
+"""
+WARN_CONFTEST = """
+import threading
+SEEN = []
+def pytest_warning_recorded(warning_message, when, nodeid):
+    assert threading.current_thread() is threading.main_thread()   # routed like xdist
+    SEEN.append(f"{nodeid.split('::')[-1]}={warning_message.message}")
+def pytest_sessionfinish(session):
+    print("\\nWARNINGS", sorted(SEEN))
+"""
+
+
+def test_warnings_captured_per_test_on_context_aware_interpreter(pytester, monkeypatch):
+    if sys.version_info < (3, 14):
+        pytest.skip("needs -X context_aware_warnings (Python 3.14+)")
+    monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "1")
+    pytester.makeconftest(WARN_CONFTEST)
+    pytester.makepyfile(WARN_TESTS)
+    base = [a for a in BASE if a != "no:warnings"]
+    base.remove("-p")                         # the one preceding "no:warnings"
+    out = {}
+    for mode in (["-n", "5"], ["--lanes", "5"], ["-n", "1", "--lanes", "5"]):
+        r = pytester.runpytest_subprocess(*base, *mode, "-rf")
+        r.assert_outcomes(passed=4, failed=1, warnings=3)
+        r.stdout.fnmatch_lines(["E  *UserWarning: boom", "FAILED *::test_error*"])
+        out[" ".join(mode)] = [ln for ln in r.outlines if ln.startswith("WARNINGS")]
+    expected = ["WARNINGS ['test_warns[0]=w0', 'test_warns[1]=w1', 'test_warns[2]=w2']"]
+    assert out == {k: expected for k in out}, out
 
 
 def test_tmp_path_basetemp_created_once_across_lanes(pytester):
