@@ -5,6 +5,8 @@ threading.Barrier across lanes rather than sleeps, so concurrency is guaranteed.
 Those tests run lanes in one process (ONE_PROCESS); plain xdist has no shared
 process, so there the barrier is off.
 """
+import sys
+
 import pytest
 from lanes_testing import MODES, report_log, run
 
@@ -220,3 +222,39 @@ def test_each_lane_is_its_own_xdist_worker(pytester, monkeypatch, mode, expected
     assert len({d["uid"] for d in idents}) == 1, idents        # one test run
     if mode[0] == "--lanes":
         assert (pytester.path / "main-role").read_text() == "False"
+
+
+# ---------------------------------------------------------------- warnings before 3.14
+WARNS_TESTS = """
+import warnings, pytest
+def test_plain():
+    with pytest.warns(UserWarning):
+        warnings.warn("w", UserWarning)
+def test_deprecated_call():
+    with pytest.deprecated_call():
+        warnings.warn("d", DeprecationWarning)
+@pytest.mark.lanes_exclusive
+def test_marked():
+    with pytest.warns(UserWarning):
+        warnings.warn("w", UserWarning)
+"""
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "1", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_pytest_warns_fails_closed_without_context_aware_warnings(pytester, monkeypatch, mode):
+    # Before 3.14 (or with context-aware warnings off) catch_warnings swaps process-wide
+    # state: concurrent pytest.warns blocks failed 5 times in 6. A non-exclusive test
+    # using it must fail deterministically, with instructions, instead of flaking.
+    monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "0")   # ignored before 3.14
+    pytester.makepyfile(WARNS_TESTS)
+    r = run(pytester, *mode, "-rf", timeout=60)
+    r.assert_outcomes(passed=1, failed=2)
+    assert r.stdout.str().count("mark it @pytest.mark.lanes_exclusive") == 2, r.stdout.str()
+
+
+def test_pytest_warns_runs_normally_with_context_aware_warnings(pytester, monkeypatch):
+    if sys.version_info < (3, 14):
+        pytest.skip("needs context-aware warnings (Python 3.14+)")
+    monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "1")
+    pytester.makepyfile(WARNS_TESTS)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=3)
