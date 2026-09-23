@@ -1,4 +1,5 @@
 """Contract tests: lanes must look like xdist --dist loadgroup to consumers."""
+import re
 import sys
 
 import pytest
@@ -223,8 +224,9 @@ def test_capfd_routed_to_serial_phase(pytester):
     )
     r = run(pytester, "--lanes", "2", "-v")
     r.assert_outcomes(passed=1)
-    # The nodeid may be on this line or the one before, depending on pytest's version.
-    r.stdout.fnmatch_lines(["*test_fd*", "*[[]ln-serial[]]*PASSED*"])
+    # The nodeid may come before or after the result, on the same line or not.
+    out = r.stdout.str()
+    assert re.search(r"\[ln-serial\].*PASSED", out) and "test_fd" in out, out
 
 
 CUSTOM_SCHED = """
