@@ -242,3 +242,43 @@ def test_hybrid_lane_id_reaches_controller_hooks(pytester):
     """)
     r = run(pytester, "-n", "2", "--lanes", "2", "-s", timeout=60)
     r.stdout.fnmatch_lines(["LANEIDS ['gw0.ln0', 'gw0.ln1', 'gw1.ln0', 'gw1.ln1']"])
+
+
+# ---------------------------------------------------------------- timeouts (fail closed)
+@pytest.mark.parametrize("how", ["option", "ini", "env", "marker"])
+def test_pytest_timeout_is_refused_in_single_process_mode(pytester, monkeypatch, how):
+    # pytest-timeout cannot use signals on a lane thread; its thread method os._exit()s
+    # the whole process, ending every lane with no reports. Refuse, pointing to hybrid.
+    pytest.importorskip("pytest_timeout")
+    args = []
+    if how == "marker":
+        pytester.makepyfile("import pytest\n@pytest.mark.timeout(5)\ndef test_t(): pass")
+    else:
+        pytester.makepyfile("def test_t(): pass")
+        if how == "option":
+            args = ["--timeout", "5"]
+        elif how == "ini":
+            pytester.makeini("[pytest]\ntimeout = 5\n")
+        else:
+            monkeypatch.setenv("PYTEST_TIMEOUT", "5")
+    r = run(pytester, "--lanes", "2", *args, timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR
+    r.stderr.fnmatch_lines(["*pytest-timeout*"])
+
+
+def test_pytest_timeout_off_or_in_hybrid_mode_is_fine(pytester):
+    pytest.importorskip("pytest_timeout")
+    pytester.makepyfile("def test_t(): pass")
+    run(pytester, "--lanes", "2", "--timeout", "0", timeout=60).assert_outcomes(passed=1)
+    run(pytester, "-n", "2", "--lanes", "2", "--timeout", "5", timeout=60).assert_outcomes(passed=1)
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "2", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_faulthandler_timeout_is_refused(pytester, mode):
+    # Its timer is process-wide and every test restarts or cancels it, so under lanes
+    # it never fires for the test that hangs. Refuse rather than pretend.
+    pytester.makepyfile("def test_t(): pass")
+    pytester.makeini("[pytest]\nfaulthandler_timeout = 5\n")
+    r = run(pytester, *mode, timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR
+    r.stderr.fnmatch_lines(["*faulthandler_timeout*"])
