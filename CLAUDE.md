@@ -60,7 +60,8 @@ Any change that breaks one of these is a regression.
 | P3 | `LoggingPlugin.caplog_handler` / `.report_handler` | Per-lane dispatch; a permanent root `_LogRouter` makes pytest's concurrent handler attach/detach harmless |
 | P4 | pluggy `PluginManager._inner_hookexec` | Routes the 4 controller hooks to the main thread (the same slot pluggy's public `add_hookcall_monitoring` uses) |
 | P5 | `item._nodeid` | `@group` suffix under loadgroup, identical to xdist's worker |
-| P6 | `_pytest.runner._update_current_test_var` | pytest pops `PYTEST_CURRENT_TEST` without a default, so lanes finishing together raised KeyError (3 of 1,000) |
+| P6 | `_pytest.runner._update_current_test_var` | pytest pops `PYTEST_CURRENT_TEST` without a default, so lanes finishing together raised KeyError (3 of 1,000). The replacement uses `del` + `suppress(KeyError)`, because `pop(k, None)` is check-then-delete and still races (constantly on 3.14t) |
+| P7 | `config._tmp_path_factory.getbasetemp` | pytest creates basetemp lazily without a lock; with `--basetemp` (always set on xdist workers) two lanes' first `tmp_path` both `rmtree`+`mkdir` it. Wrapped per instance with a lock, still lazy. Needs lanes' `pytest_configure` to be `trylast` so the probe runs after the tmpdir plugin configures |
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |

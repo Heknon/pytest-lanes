@@ -21,6 +21,7 @@ Private touchpoints (probed at startup; fail closed):
   P4 PluginManager._inner_hookexec                (pluggy)
   P5 item._nodeid "@group" suffix, loadgroup only (same thing xdist's worker does)
   P6 _pytest.runner._update_current_test_var (PYTEST_CURRENT_TEST pop race)
+  P7 config._tmp_path_factory.getbasetemp (lazy basetemp creation race)
   X1 xdist scheduler protocol (xdist, semi-public; probed per scheduler)
   hybrid (-n N --lanes M) only:
   X2 WorkerInteractor.channel / sendevent on the worker (xdist private)
@@ -253,6 +254,7 @@ def pytest_load_initial_conftests(early_config, parser, args):
     return (yield)
 
 
+@pytest.hookimpl(trylast=True)  # after builtins configure (the P7 probe needs tmpdir's factory)
 def pytest_configure(config):
     config.addinivalue_line("markers", "lanes_exclusive: run in the serial phase, alone")
     if config.getoption("lanes"):
@@ -294,6 +296,11 @@ def _probe(config) -> None:
 
     if not callable(getattr(_runner, "_update_current_test_var", None)):
         problems.append("P6 _pytest.runner._update_current_test_var")
+    if config.pluginmanager.get_plugin("tmpdir") is not None:
+        tpf = getattr(config, "_tmp_path_factory", None)
+        if tpf is None or not callable(getattr(tpf, "getbasetemp", None)) \
+                or not hasattr(tpf, "__dict__"):
+            problems.append("P7 config._tmp_path_factory.getbasetemp")
     for name, hook in (("threadexception", "threading.excepthook"),
                        ("unraisableexception", "sys.unraisablehook")):
         mod = config.pluginmanager.get_plugin(name)
@@ -341,6 +348,17 @@ class LanesSession:
 
         self._orig_update = orig_update
         runner._update_current_test_var = _update_current_test_var
+        # P7: pytest creates basetemp lazily and without a lock; with --basetemp (always set on
+        # xdist workers) two lanes' first tmp_path both rmtree+mkdir it. Serialize, stay lazy.
+        self._tpf = tpf = getattr(self.config, "_tmp_path_factory", None)
+        if tpf is not None:
+            unlocked, lock = tpf.getbasetemp, threading.Lock()
+
+            def getbasetemp():
+                with lock:
+                    return unlocked()
+
+            tpf.getbasetemp = getbasetemp
         self._main_ss = session._setupstate                      # P1
         self._ss_cls = type(self._main_ss)
         session._setupstate = _SetupStateRouter(self._main_ss)
@@ -390,6 +408,8 @@ class LanesSession:
         from _pytest import runner  # noqa: PLC0415
 
         runner._update_current_test_var = self._orig_update
+        if self._tpf is not None:
+            self._tpf.__dict__.pop("getbasetemp", None)
         sys.stdout, sys.stderr = self._real_out, self._real_err
         self.config.pluginmanager._inner_hookexec = self._inner
         session._setupstate = self._main_ss
