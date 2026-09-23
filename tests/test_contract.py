@@ -223,7 +223,8 @@ def test_capfd_routed_to_serial_phase(pytester):
     )
     r = run(pytester, "--lanes", "2", "-v")
     r.assert_outcomes(passed=1)
-    r.stdout.fnmatch_lines(["*[[]ln-serial[]]*PASSED*test_fd*"])
+    # The nodeid may be on this line or the one before, depending on pytest's version.
+    r.stdout.fnmatch_lines(["*test_fd*", "*[[]ln-serial[]]*PASSED*"])
 
 
 CUSTOM_SCHED = """

@@ -3,8 +3,15 @@
 "Cleanly" means: no hang (every run here has a timeout), no INTERNALERROR that
 xdist would not also raise, and the same exit code as plain xdist.
 """
+import inspect
+
+import _pytest.runner
 import pytest
 from lanes_testing import MODES, run
+
+#: pytest >= 8.1 tears a test down fully once the session is stopping (-x). Older
+#: runners leave session fixtures to the end of the session, even without xdist.
+RUNNER_TEARS_DOWN_ON_STOP = "shouldfail" in inspect.getsource(_pytest.runner.runtestprotocol)
 
 ENV_SCHEDULER = """
 from xdist.scheduler import LoadScopeScheduling
@@ -94,7 +101,11 @@ def test_exitfirst_reports_session_teardown_error_as_test_error(pytester, mode):
     """)
     r = run(pytester, *mode, "-x", timeout=60)
     assert "INTERNALERROR" not in r.stdout.str()
-    r.stdout.fnmatch_lines(["*ERROR at teardown of test_t*", "*RuntimeError: teardown boom*"])
+    if RUNNER_TEARS_DOWN_ON_STOP:
+        r.stdout.fnmatch_lines(["*ERROR at teardown of test_t*", "*RuntimeError: teardown boom*"])
+    elif mode[0] == "--lanes":   # left for the end of the lane: still reported, not raised
+        r.stdout.fnmatch_lines(["*ERROR tearing down lane ln* after the run stopped: "
+                                "RuntimeError: teardown boom*"])
     assert r.ret == pytest.ExitCode.INTERRUPTED                    # as xdist
 
 
