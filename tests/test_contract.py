@@ -355,7 +355,7 @@ def test_hybrid_custom_scheduler_pins_env_to_one_lane(pytester):
     for env, v in runs.items():
         v.sort()
         assert [s for _, s, _, _ in v] == [0, 1, 2], env          # sequential in order
-        assert len({(p, l) for _, _, p, l in v}) == 1, env        # one lane in one process
+        assert len({(pid, lane) for _, _, pid, lane in v}) == 1, env   # one lane in one process
     assert len({v[0][2] for v in runs.values()}) == 2             # both processes used
 
 

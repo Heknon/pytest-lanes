@@ -10,6 +10,8 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
 * P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
 * P10 ``config.workerinput`` / ``workeroutput``: each lane is its own xdist worker.
+* P11 ``_pytest.recwarn.WarningsRecorder.__enter__``: fail closed on pytest.warns
+  before Python 3.14 (warning state is process-wide there).
 * P3 and P8 (logging) live in ``capture.py``; C1 (third-party plugins) in ``compat.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
@@ -20,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import os
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -247,6 +250,41 @@ def per_lane_worker_identity(config):
         config.__class__ = original
 
 
+# ------------------------------------------------------------ P11: pytest.warns
+@contextlib.contextmanager
+def guard_warnings_recorder(is_exclusive):
+    """Fail a non-exclusive test that enters pytest.warns / deprecated_call / recwarn.
+
+    Without context-aware warnings (Python < 3.14, or the flag off) these swap the
+    process-wide warning filters and showwarning, so concurrent tests corrupted each
+    other: 5 of 6 concurrent pytest.warns blocks failed. They cannot be seen at
+    collection time, so the test fails deterministically on use, telling the user
+    to mark it lanes_exclusive (or to use Python 3.14 context-aware warnings).
+    """
+    if getattr(sys.flags, "context_aware_warnings", False):
+        yield
+        return
+    import pytest
+    from _pytest.recwarn import WarningsRecorder
+
+    original = WarningsRecorder.__dict__["__enter__"]
+
+    def __enter__(self):
+        lane = LANE.get()
+        if lane is not None and lane.current_item is not None and not is_exclusive(lane.current_item):
+            pytest.fail("pytest-lanes: pytest.warns/deprecated_call/recwarn change process-wide "
+                        "warning state before Python 3.14, so this test must run alone: mark it "
+                        "@pytest.mark.lanes_exclusive (or run on Python 3.14+ with "
+                        "-X context_aware_warnings=1).", pytrace=False)
+        return original(self)
+
+    WarningsRecorder.__enter__ = __enter__
+    try:
+        yield
+    finally:
+        WarningsRecorder.__enter__ = original
+
+
 # ------------------------------------------------------------ all together
 @dataclass
 class LaneStateFactory:
@@ -263,12 +301,13 @@ class LaneStateFactory:
 
 
 @contextlib.contextmanager
-def isolate_lanes(config, session):
+def isolate_lanes(config, session, is_exclusive):
     """Install every per-lane isolation; yields a ``LaneStateFactory``."""
     patch_fixturedef()                                                   # P2
     with contextlib.ExitStack() as stack:
         stack.enter_context(race_free_current_test_var())                # P6
         stack.enter_context(per_lane_worker_identity(config))            # P10
+        stack.enter_context(guard_warnings_recorder(is_exclusive))       # P11
         stack.enter_context(per_lane_basetemp(config))                   # P7
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3

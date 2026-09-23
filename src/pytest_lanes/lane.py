@@ -63,6 +63,7 @@ class ThreadNode:
         self.err = io.StringIO()
         self.log_handlers = log_handlers
         self.tmp_path_factory = None  # this lane's basetemp, created on first use (isolation.py)
+        self.current_item = None      # the item this lane is running, if any
 
     def send_runtest_some(self, indices) -> None:
         for i in indices:

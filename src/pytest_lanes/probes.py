@@ -77,6 +77,16 @@ def _p10_worker_identity(config):
     return None
 
 
+def _p11_warnings_recorder(config):
+    if getattr(sys.flags, "context_aware_warnings", False):
+        return None
+    from _pytest.recwarn import WarningsRecorder
+
+    if "__enter__" not in vars(WarningsRecorder):
+        return "P11 _pytest.recwarn.WarningsRecorder.__enter__"
+    return None
+
+
 def _p4_hookexec(config):
     if not hasattr(config.pluginmanager, "_inner_hookexec"):
         return "P4 pluggy PluginManager._inner_hookexec"
@@ -164,7 +174,8 @@ def _per_test_global_hooks(config):
 
 CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
           _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
-          _p10_worker_identity, _x1_xdist_scheduler_api, _c1_rerunfailures_client,
+          _p10_worker_identity, _p11_warnings_recorder, _x1_xdist_scheduler_api,
+          _c1_rerunfailures_client,
           _pytest_timeout, _faulthandler_timeout)
 
 

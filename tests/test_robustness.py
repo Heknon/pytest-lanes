@@ -53,7 +53,8 @@ def pytest_runtest_protocol(item, nextitem):
 @pytest.mark.parametrize("mode", MODES.values(), ids=MODES.keys())
 def test_keyboard_interrupt_in_a_test_ends_run_interrupted(pytester, mode):
     pytester.makeconftest(ENV_SCHEDULER)
-    pytester.makepyfile(ENV_TESTS.replace("{body}", 'if env == "envB" and step == 1: raise KeyboardInterrupt'))
+    body = 'if env == "envB" and step == 1: raise KeyboardInterrupt'
+    pytester.makepyfile(ENV_TESTS.replace("{body}", body))
     r = run(pytester, *mode, timeout=60)
     assert r.ret == pytest.ExitCode.INTERRUPTED
 

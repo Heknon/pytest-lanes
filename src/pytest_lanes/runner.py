@@ -70,7 +70,7 @@ class LaneRunner:
     @pytest.hookimpl(trylast=True)  # after runner.py creates session._setupstate
     def pytest_sessionstart(self, session):
         stack = self._session_stack
-        self.lane_state = stack.enter_context(isolate_lanes(self.config, session))
+        self.lane_state = stack.enter_context(isolate_lanes(self.config, session, self.is_exclusive))
         self.hooks = stack.enter_context(ControllerHookRouter(
             self.config.pluginmanager, self.events, session, set_report_node=self.set_report_node))
 
@@ -147,8 +147,12 @@ class LaneRunner:
                 nextitem = None if nxt is SHUTDOWN else items[nxt]
                 start = time.perf_counter()
                 rw = self.exclusive_lock
-                with (rw.exclusive if self.is_exclusive(item) else rw.shared)():
-                    hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+                node.current_item = item
+                try:
+                    with (rw.exclusive if self.is_exclusive(item) else rw.shared)():
+                        hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+                finally:
+                    node.current_item = None
                 # Wait until the main thread has replayed this item's reports and
                 # told the scheduler, so -x/--maxfail stop exactly as a sequential run does.
                 ack = threading.Event()
