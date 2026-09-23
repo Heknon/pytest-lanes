@@ -46,7 +46,7 @@ Any change that breaks one of these is a regression.
   - **`LanesSession`:** installs and uninstalls the touchpoints, captures per phase, builds the scheduler (`_make_scheduler` calls xdist's own factory hook), runs `_node_loop` (a copy of xdist's `WorkerInteractor` loop), runs `_pump` (the main-thread event loop), and contains `_worker_runtestloop` for hybrid workers.
   - **`LaneMux`, `LaneProxy`, `LanesController`:** the hybrid controller side. The mux wraps the user's scheduler, presenting P real workers to xdist's `DSession` and P×M virtual lanes to the scheduler.
   - **`_RWLock`:** makes exclusive tests (capsys, capfd, recwarn, or the `lanes_exclusive` mark) run alone within their process.
-- `tests/test_contract.py` holds 15 pytester subprocess tests. These are the spec.
+- `tests/test_contract.py` holds 18 pytester subprocess tests. These are the spec.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is a draft CI workflow. It has never been run.
@@ -69,20 +69,25 @@ Any change that breaks one of these is a regression.
 ## How to run
 
 ```bash
-pip install -e ".[test]"
-python -m pytest tests -q -p no:cacheprovider -p no:warnings      # 15 tests, about 20s
-scripts/matrix.sh                                                  # version matrix (needs PyPI)
+uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings   # 18 tests, about 25s
+scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
+RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
+
+`scripts/matrix.sh` uses uv. Use a uv new enough to know CPython 3.14 final (uv 0.8.x only has 3.14.0rc2); `uvx --from uv uv python install 3.14 3.14t` works if the installed uv is older.
 
 Required flags and environment:
 
-- On Python 3.13 or earlier, `-p no:warnings` is mandatory, because `catch_warnings` is not thread-safe there and the plugin refuses to run otherwise. On Python 3.14 or later, use `-X context_aware_warnings=1` instead.
+- On Python 3.13 or earlier, `-p no:warnings` is mandatory, because `catch_warnings` is not thread-safe there and the plugin refuses to run otherwise. On Python 3.14 or later, use `-X context_aware_warnings=1` (or `PYTHON_CONTEXT_AWARE_WARNINGS=1`) instead; free-threaded 3.14t has it on by default.
 - pytest 8.3.5 and earlier also need `-p no:threadexception -p no:unraisableexception`, because those versions swap global hooks per test. `tests/` adds these flags automatically when needed.
 - Tests use `runpytest_subprocess`. Keep it that way: in-process pytester would share the patched `FixtureDef` class and the global hooks.
 
-## Verified status (Python 3.12, 1-core sandbox)
+## Verified status
 
-- **All 15 tests pass** on pytest 8.0.2, 8.3.5 and 9.1.1, with xdist 3.6.1 and 3.8.0.
+- **Round 2 (4-core container, uv):** all 18 tests pass (the 3.14 warnings test skips on 3.12/3.13) on CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, pytest 8.3.5 / xdist 3.6.1 and pytest 9.1.1 / xdist 3.8.0.
+  - The 15 original tests did **not** pass reliably on 4 cores: the P7 basetemp race failed the hybrid tests in roughly half of all runs on every version, and the P6 `pop` race failed 2–5 tests per run on 3.14t. Both are fixed, with contract tests.
+- **Round 1 (Python 3.12, 1-core sandbox):** all 15 tests passed on pytest 8.0.2, 8.3.5 and 9.1.1, with xdist 3.6.1 and 3.8.0.
 - **Scheduling:** the same custom scheduler works under `-n`, `--lanes`, and hybrid. Each environment is pinned to one lane, runs in order, and environments run in parallel.
 - **Report parity:** report-log output is identical to plain xdist loadgroup, in both single-process and hybrid mode.
 - **Crash recovery (hybrid):** a test calling `os._exit` was reported as crashed, xdist replaced the worker, and the work was rescheduled and passed.
@@ -101,11 +106,11 @@ These are not bugs to "fix" by weakening the invariants.
 - **Exclusive tests pause their whole process.**
 - **Unsupported:** `each` and `worksteal` modes, and `--pdb`.
 - **Ctrl-C** doesn't interrupt running tests.
-- **One flaky failure,** seen once in about 10 runs on pytest 8.3.5 and never reproduced; probably a wall-clock assertion.
+- **Wall-clock assertions** (`r.duration < N`) in `tests/` are load-sensitive (backlog item 2). The earlier unreproduced flake was most likely the P7 basetemp race, which a 1-core box rarely hits.
 
 ## Backlog, in priority order, with acceptance criteria
 
-1. **Run on the target interpreters.**
+1. **Run on the target interpreters.** *Done in round 2: see Verified status; fixes P6 (atomic delete) and P7 (new).*
    - Add Python 3.13, 3.14 and 3.14t to the matrix and make it pass.
    - On 3.14, the warnings probe must accept `-X context_aware_warnings=1`.
    - Add a contract test proving per-test warning capture and `filterwarnings("error")` work under lanes on 3.14.

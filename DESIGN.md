@@ -61,7 +61,7 @@ Every touchpoint is probed at startup, and the plugin fails closed if a probe fa
 
 ## Verified
 
-The contract suite has 15 tests. It passes on pytest 8.0.2, 8.3.5 and 9.1.1, with xdist 3.6.1 and 3.8.0, on Python 3.12. The older pytest versions need two plugins disabled, as explained below.
+The contract suite has 18 tests. It passes on CPython 3.12, 3.13, 3.14 and free-threaded 3.14t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1 and 9.1.1 / 3.8.0 (round 2, 4 cores). The older pytest versions need two plugins disabled, as explained below.
 
 - **Same custom scheduler under `-n 3` and `--lanes 3`:** each environment ran sequentially on one worker, and environments ran in parallel.
 - **Hybrid `-n 2 --lanes 3`:** 6 environments × 3 steps each. Every environment stayed on one lane in one process, in order, and both processes were used. Wall time was 2.5s, against 1.8s of sequential work per environment.
@@ -70,11 +70,19 @@ The contract suite has 15 tests. It passes on pytest 8.0.2, 8.3.5 and 9.1.1, wit
 - **Hybrid exclusivity:** a `capsys` test ran exclusively inside its worker, protected by a read/write lock, while noisy tests ran in other lanes.
 - **Semantics carried over from earlier rounds:** fixture isolation, per-test stdout and log capture, `-x`, rerunfailures, and allowlisted node hooks.
 
-### Found and fixed in this round
+### Found and fixed in round 1
 
 1. **`PYTEST_CURRENT_TEST` race in pytest core.** The runner calls `os.environ.pop("PYTEST_CURRENT_TEST")` without a default. When two lanes finish at the same moment, one of them gets a KeyError during teardown. This showed up in 3 of 1,000 tests on a 40×25 run. It affects single-process lanes too; it just hadn't triggered there yet. Fixed via P6. The variable's value is now "last writer wins", which is only meaningful per lane.
 2. **xdist's worker reads `self.item_index` when forwarding each report.** Lane reports are replayed with the matching index set (X2).
 3. **pytest 8.3.5 and earlier swap `threading.excepthook` and `sys.unraisablehook` per test phase.** Under lanes these swaps race. pytest 9.1.1 installs them once instead. On older pytest the plugin refuses to run unless you pass `-p no:threadexception -p no:unraisableexception`. With those disabled, unhandled thread exceptions still print, but they no longer become per-test warnings.
+
+### Found and fixed in round 2 (target interpreters, 4 cores)
+
+The 15-test suite had only ever run on a 1-core sandbox. On a 4-core container it failed in about half of all runs, on every pytest version, and 2–5 tests per run on free-threaded 3.14t. Both causes are lanes concurrency bugs, not timing:
+
+1. **basetemp creation race (new touchpoint P7).** `TempPathFactory.getbasetemp()` creates the base temp directory on first use, without a lock. With `--basetemp`, which xdist always sets on its workers, two lanes that request `tmp_path` or `tmp_path_factory` at the same time both `rm_rf` and `mkdir` it, and one fails with `FileExistsError`. It affects single-process lanes as well. The fix wraps `getbasetemp` on the process's factory instance with a lock, so creation stays lazy and exactly as pytest does it. The probe needs `config._tmp_path_factory` to exist, so lanes' `pytest_configure` is now `trylast` (after the builtin tmpdir plugin). This was very likely the "unreproduced intermittent failure" from round 1.
+2. **The P6 fix still raced.** `os.environ.pop(key, None)` is `MutableMapping.pop`, which reads the key and then deletes it, so another lane can delete in between. It is now `del os.environ[key]` inside `suppress(KeyError)`. On 3.14t this hit several times per suite run.
+3. **Warnings on 3.14.** With `context_aware_warnings` (the default on 3.14t, `-X context_aware_warnings=1` on 3.14), pytest's own per-test `catch_warnings` works under lanes as-is: `filterwarnings("error")` and `("ignore")` stay inside their test, and `pytest_warning_recorded` output matches `-n`. No plugin change was needed. A contract test proves it, and it fails when the probe is bypassed on a non-context-aware interpreter.
 
 ## Sizing: processes × lanes
 
@@ -113,7 +121,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | # | Issue |
 |---|---|
 | F1 | **Process-global state is the biggest risk:** `mock.patch`, `monkeypatch` on shared modules, `os.environ`, `chdir`, signals, `caplog.set_level`. Audit it, and route affected tests with `lanes_exclusive`. |
-| F2 | **Warnings:** `catch_warnings` isn't thread-safe before Python 3.14. Use `-X context_aware_warnings=1` on 3.14+, or `-p no:warnings`, which makes `filterwarnings` marks inert. |
+| F2 | **Warnings:** `catch_warnings` isn't thread-safe before Python 3.14. Use `-X context_aware_warnings=1` on 3.14+ (the default on 3.14t), or `-p no:warnings`, which makes `filterwarnings` marks inert. |
 | F3 | **Output from threads your tests spawn** is only attributed with `-X thread_inherit_context=1` on Python 3.14. fd-level writes are never attributed per test. |
 | F4 | **Hung tests:** threads can't be killed. In hybrid mode, use a process watchdog. In single-process mode there's no answer yet. |
 | F5 | **Crash collateral:** in-flight tests on sibling lanes are reported as crashed. They rerun, but the reports remain. |
@@ -121,7 +129,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F7 | **`each` and `worksteal` modes are unsupported.** worksteal is implementable. `--pdb` is unsupported, as it is under xdist. |
 | F8 | **Ctrl-C** doesn't interrupt running tests. |
 | F9 | **`--lanes` means lanes per process in hybrid mode.** The total is `-n` × `--lanes`. |
-| F10 | **One unreproduced intermittent failure** on pytest 8.3.5 in about 10 runs of the suite. It is most likely a wall-clock assertion on the 1-core sandbox. |
+| F10 | **Wall-clock assertions in `tests/`** are load-sensitive. The round-1 intermittent failure was most likely the P7 basetemp race, now fixed. |
 
 ## Compatibility plan
 
@@ -133,7 +141,6 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 
 ## Not yet tested
 
-- Python 3.13, 3.14 and 3.14t.
 - pytest-cov, Allure, your instrumentation plugin, and your real infrastructure.
-- A multi-core machine.
+- A machine with more than 4 cores.
 - A real watchdog.
