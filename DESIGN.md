@@ -55,6 +55,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P5 | `item._nodeid` | Adds the `@group` suffix under loadgroup, as xdist's worker does |
 | P6 | `_pytest.runner._update_current_test_var` | Fixes a `PYTEST_CURRENT_TEST` race (see below) |
 | P7 | `config._tmp_path_factory.getbasetemp` | Serializes pytest's lazy basetemp creation across lanes (see below) |
+| P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it at every test phase; views are served from a copy so concurrent logger creation cannot break that |
 | X1 | xdist scheduler protocol | Semi-public; probed on each scheduler instance |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |

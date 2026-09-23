@@ -48,7 +48,7 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 | `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler | X3, X4 |
 | `scheduling.py` | `make_scheduler` (via xdist's own factory hook), the scheduler protocol check, the loadgroup `@group` suffix | X1, P5 |
 | `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7 |
-| `capture.py` | Per-lane stdout/stderr and logging | P3 |
+| `capture.py` | Per-lane stdout/stderr and logging; logging's logger registry made safe to iterate | P3, P8 |
 | `hookrouting.py` | `ControllerHookRouter`: the 4 controller hooks queued on lanes and replayed on the main thread | P4 |
 | `probes.py` | Fail-closed startup checks, one function per touchpoint | all except P1, P5 |
 
@@ -77,6 +77,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | P5 | `item._nodeid` | `@group` suffix under loadgroup, identical to xdist's worker |
 | P6 | `_pytest.runner._update_current_test_var` | pytest pops `PYTEST_CURRENT_TEST` without a default, so lanes finishing together raised KeyError (3 of 1,000). The replacement uses `del` + `suppress(KeyError)`, because `pop(k, None)` is check-then-delete and still races (constantly on 3.14t) |
 | P7 | `config._tmp_path_factory.getbasetemp` | pytest creates basetemp lazily without a lock; with `--basetemp` (always set on xdist workers) two lanes' first `tmp_path` both `rmtree`+`mkdir` it. Wrapped per instance with a lock, still lazy. Needs lanes' `pytest_configure` to be `trylast` so the probe runs after the tmpdir plugin configures |
+| P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it whenever a test phase starts; a logger created on another lane at that moment raised "dictionary changed size" (reproduced 5/5 on 3.12 with 64 lanes). Replaced for the session by a dict subclass whose views come from an atomic copy |
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |

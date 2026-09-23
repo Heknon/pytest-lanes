@@ -19,7 +19,6 @@ same slot that pluggy's public ``add_hookcall_monitoring`` wraps.
 from __future__ import annotations
 
 import threading
-
 from typing import NamedTuple
 
 from .lane import LANE

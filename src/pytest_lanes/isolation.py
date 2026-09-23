@@ -9,6 +9,7 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P2 ``FixtureDef.cached_result`` / ``_finalizers``: fixture caches per lane.
 * P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
 * P7 ``config._tmp_path_factory.getbasetemp``: basetemp creation race.
+* P3 and P8 (logging) live in ``capture.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
 ``capture.py`` and undoes them on exit.
@@ -20,7 +21,12 @@ import os
 import threading
 from dataclasses import dataclass
 
-from .capture import clone_log_handlers, per_lane_logging, per_lane_std_streams
+from .capture import (
+    clone_log_handlers,
+    per_lane_logging,
+    per_lane_std_streams,
+    snapshot_logger_dict,
+)
 from .lane import LANE
 
 
@@ -161,5 +167,6 @@ def isolate_lanes(config, session):
         stack.enter_context(locked_basetemp(config))                     # P7
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
+        stack.enter_context(snapshot_logger_dict())                       # P8
         stack.enter_context(per_lane_std_streams())
         yield LaneStateFactory(setupstate_cls, log_templates)

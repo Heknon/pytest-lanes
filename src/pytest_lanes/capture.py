@@ -1,4 +1,4 @@
-"""Per-lane output capture: stdout/stderr and logging (touchpoint P3).
+"""Per-lane output capture: stdout/stderr and logging (touchpoints P3, P8).
 
 pytest's own capture is process-wide, so lanes switch it off (``--capture=no``)
 and capture per lane instead:
@@ -12,6 +12,10 @@ and capture per lane instead:
   pytest attaching and detaching handlers concurrently from many lanes is harmless.
 
 On the main thread (no lane), everything falls through to the real objects.
+
+P8: pytest >= 9 iterates ``logging.Logger.manager.loggerDict`` each time a test
+phase starts. Another lane creating a logger at that moment made the iteration
+raise "dictionary changed size", so the dict's views are served from a copy.
 """
 from __future__ import annotations
 
@@ -107,6 +111,36 @@ class _LogRouter(logging.Handler):
 
     def emit(self, record):  # pragma: no cover
         pass
+
+
+class _SnapshotLoggerDict(dict):
+    """logging's registry of loggers, whose views come from an atomic copy.
+
+    ``__iter__`` must stay dict's own: ``dict.copy`` takes its C fast path only
+    while it is, and otherwise calls ``keys()`` (recursing into this class).
+    """
+
+    def keys(self):
+        return dict.copy(self).keys()
+
+    def values(self):
+        return dict.copy(self).values()
+
+    def items(self):
+        return dict.copy(self).items()
+
+
+@contextlib.contextmanager
+def snapshot_logger_dict():
+    """P8. Restores the original dict object, with any loggers created meanwhile."""
+    manager = logging.Logger.manager
+    original = manager.loggerDict
+    manager.loggerDict = _SnapshotLoggerDict(original)
+    try:
+        yield
+    finally:
+        original.update(manager.loggerDict)
+        manager.loggerDict = original
 
 
 @contextlib.contextmanager
