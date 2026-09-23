@@ -141,3 +141,23 @@ def test_module_fixture_setups_match_xdist_under_loadfile(pytester):
         run(pytester, *dist_args(mode, "loadfile")).assert_outcomes(passed=8)
         setups = sorted(f.name.split("-")[1] for f in pytester.path.glob("setup-*"))
         assert setups == ["test_m1", "test_m2"], (name, setups)
+
+
+def test_rerunfailures_under_concurrent_lanes_in_a_worker(pytester):
+    # pytest-rerunfailures >= 15 gives each xdist worker one socket to the controller's
+    # rerun database. A worker's lanes share it; unsynchronised, their request/response
+    # pairs interleaved and a lane died with ValueError (INTERNALERROR).
+    pytest.importorskip("pytest_rerunfailures")
+    pytester.makepyfile("""
+        import pytest
+        COUNT = {}
+        @pytest.mark.parametrize("i", range(64))
+        @pytest.mark.flaky(reruns=2)
+        def test_flaky(i):
+            COUNT[i] = COUNT.get(i, 0) + 1
+            assert COUNT[i] >= 2
+    """)
+    r = run(pytester, "-n", "2", "--lanes", "8", timeout=120)
+    assert "INTERNALERROR" not in r.stdout.str()
+    outcomes = r.parseoutcomes()
+    assert (outcomes.get("passed"), outcomes.get("rerun")) == (64, 64), outcomes
