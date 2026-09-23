@@ -45,7 +45,7 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 | `runner.py` | `LaneRunner`, the base of both test-running sessions: session-long install/uninstall, per-phase capture, the lane loop (`_node_loop`, a copy of xdist's `WorkerInteractor` loop), the main-thread pump (`_pump`), and `ReadWriteLock` for exclusive tests | |
 | `single.py` | `SingleProcessSession` (`--lanes N`): plays xdist's DSession on the main thread, then runs exclusive tests on `ln-serial` | |
 | `worker.py` | `HybridWorkerSession` (a worker of `-n P --lanes M`): takes over xdist's worker loop and channel | X2 |
-| `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler | X3 |
+| `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler | X3, X4 |
 | `scheduling.py` | `make_scheduler` (via xdist's own factory hook), the scheduler protocol check, the loadgroup `@group` suffix | X1, P5 |
 | `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7 |
 | `capture.py` | Per-lane stdout/stderr and logging | P3 |
@@ -59,7 +59,7 @@ Mode selection in `pytest_configure`:
 
 Other files:
 
-- `tests/test_contract.py` holds 18 pytester subprocess tests. These are the spec.
+- `tests/test_contract.py` holds 21 pytester subprocess tests. These are the spec.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is a draft CI workflow. It has never been run.
@@ -80,12 +80,13 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
+| X4 | hybrid controller: `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Mirrored on each `LaneProxy`, so a custom scheduler or plugin reading them sees a worker (`workerinput` gets the lane's id and the total lane count). Probed by checking the xdist code that sets them |
 
 ## How to run
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
-.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings   # 18 tests, about 25s
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings   # 21 tests, about 25s
 scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
@@ -155,7 +156,7 @@ These are not bugs to "fix" by weakening the invariants.
 9. **CI.** Make `.github/workflows/ci.yml` actually run, including the nightly job against pytest and xdist `main`. If the user's environment is air-gapped, adapt `scripts/matrix.sh` to a local package index instead.
 10. **Upstream.** Draft two issues:
     - pytest: `PYTEST_CURRENT_TEST` should use `pop(..., None)`, plus a public API for per-context SetupState and fixture caches, to remove P1, P2 and P6.
-    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X3. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers.
+    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X4. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers.
 
 ## Working rules
 

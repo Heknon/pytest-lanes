@@ -7,7 +7,8 @@ than letting lanes run incorrectly. The IDs match the touchpoint tables in
 CLAUDE.md and DESIGN.md.
 
 X1 is also checked on each scheduler instance (``scheduling.make_scheduler``).
-X2 and X3 exist only in hybrid mode and are resolved where they are used.
+X2 (hybrid worker) is resolved where it is used. X3 and X4 (hybrid controller)
+are checked by ``check_controller_touchpoints``.
 
 Not probed (a gap carried over from the original single-file plugin): P1
 ``session._setupstate`` and P5 ``item._nodeid``. The contract tests cover both.
@@ -97,6 +98,40 @@ CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_
 
 
 def check_touchpoints(config) -> None:
-    problems = [p for p in (check(config) for check in CHECKS) if p]
+    """Every process that runs tests on lanes (single-process, hybrid worker)."""
+    _raise_if([check(config) for check in CHECKS])
+
+
+# ---- hybrid controller -----------------------------------------------------------
+def _x3_handle_crashitem(config):
+    from xdist.dsession import DSession
+
+    if not callable(getattr(DSession, "handle_crashitem", None)):
+        return "X3 xdist DSession.handle_crashitem"
+    return None
+
+
+def _x4_worker_attributes(config):
+    # LaneProxy mirrors these WorkerController attributes (set in the code checked here).
+    from xdist.dsession import DSession
+    from xdist.workermanage import WorkerController
+
+    if not ("workerinput" in WorkerController.__init__.__code__.co_names
+            and "workerinfo" in DSession.worker_workerready.__code__.co_names
+            and "workeroutput" in WorkerController.process_from_remote.__code__.co_names):
+        return "X4 xdist WorkerController.workerinput/workerinfo/workeroutput"
+    return None
+
+
+CONTROLLER_CHECKS = (_x3_handle_crashitem, _x4_worker_attributes)
+
+
+def check_controller_touchpoints(config) -> None:
+    """The hybrid controller, which runs no tests itself."""
+    _raise_if([check(config) for check in CONTROLLER_CHECKS])
+
+
+def _raise_if(problems) -> None:
+    problems = [p for p in problems if p]
     if problems:
         raise pytest.UsageError("pytest-lanes refuses to run (fail-closed):\n  " + "\n  ".join(problems))

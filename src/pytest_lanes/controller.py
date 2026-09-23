@@ -10,6 +10,9 @@ detection and worker replacement. We wrap whatever scheduler
 ``LaneProxy.send_runtest_some()`` becomes a ``lanes_runtests`` command to the
 worker process (handled in ``worker.py``), and ``mark_test_complete`` is routed
 back to the lane that owns the item.
+
+Touchpoints: X3 (``DSession.handle_crashitem``) and X4 (the WorkerController
+attributes that ``LaneProxy`` mirrors).
 """
 from __future__ import annotations
 
@@ -22,14 +25,30 @@ from .scheduling import reject_unsupported
 
 
 class LaneProxy:
-    """Virtual node: one lane inside one xdist worker process."""
+    """Virtual node: one lane inside one xdist worker process.
+
+    Carries the worker-facing attributes of xdist's WorkerController, so that a
+    custom scheduler (or a plugin) reading them sees a worker. ``workerinput`` is
+    the process's own, with this lane's id and the total lane count.
+    ``workerinfo`` and ``workeroutput`` are the process's.
+    """
 
     def __init__(self, wc, lane: int, mux) -> None:
         self.wc = wc              # xdist's WorkerController for the process
         self.lane = lane
         self.mux = mux
         self.gateway = SimpleNamespace(id=f"{wc.gateway.id}.ln{lane}", spec=wc.gateway.spec)
+        self.workerinput = {**wc.workerinput, "workerid": self.gateway.id,
+                            "workercount": mux.total_lanes}
         self.shutting_down = False
+
+    @property
+    def workerinfo(self):  # set on the WorkerController by DSession before add_node
+        return {**self.wc.workerinfo, "id": self.gateway.id, "spec": self.gateway.spec}
+
+    @property
+    def workeroutput(self):  # like the WorkerController's: exists once the process finished
+        return self.wc.workeroutput
 
     def send_runtest_some(self, indices) -> None:
         indices = list(indices)
@@ -62,7 +81,7 @@ class LaneMux:
         self.config = config
         self.vnodes: dict = {}   # WorkerController -> [LaneProxy]
         self.owner: dict = {}    # item index -> LaneProxy that is running it
-        inner.numnodes = inner.numnodes * lanes_per_worker
+        inner.numnodes = self.total_lanes = inner.numnodes * lanes_per_worker
 
     # --- the DSession-facing surface (every attribute DSession reads) ---
     @property

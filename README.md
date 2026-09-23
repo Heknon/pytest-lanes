@@ -106,7 +106,7 @@ Two problems have to be solved to run many pytest tests at once in one process:
 1. **pytest keeps per-run state that assumes one test at a time.** This covers `SetupState`, fixture caches, capture, log handlers and a couple of races. `isolation.py` and `capture.py` re-key each of these by the current lane, using a contextvar (`LANE`) that is set on each lane thread.
 2. **Reporters expect one thread and xdist's hook split.** xdist forwards exactly four hooks from workers to the controller: `pytest_runtest_logstart`, `logreport`, `logfinish` and `warning_recorded`. `hookrouting.py` intercepts those four on lanes, queues them, and the main thread replays them in order. Every other hook runs on the lane, as it would in a worker.
 
-Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P7, X1–X3), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
+Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P7, X1–X4), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
 
 ### The life of one test (`--lanes N`)
 
@@ -136,7 +136,7 @@ src/pytest_lanes/
   runner.py        LaneRunner: lane threads, main-thread pump, capture hooks, exclusivity lock
   single.py        --lanes N
   worker.py        -n P --lanes M, worker process                       (X2)
-  controller.py    -n P --lanes M, controller: LanesController, LaneMux  (X3)
+  controller.py    -n P --lanes M, controller: LanesController, LaneMux  (X3, X4)
   scheduling.py    building xdist's scheduler; loadgroup suffix          (X1, P5)
   isolation.py     per-lane pytest state                                 (P1, P2, P6, P7)
   capture.py       per-lane stdout/stderr and logging                    (P3)

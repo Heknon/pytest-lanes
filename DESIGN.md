@@ -58,6 +58,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | X1 | xdist scheduler protocol | Semi-public; probed on each scheduler instance |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
+| X4 | `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Hybrid mode only; mirrored on each `LaneProxy` so custom schedulers see worker-shaped nodes |
 
 ## Verified
 
@@ -137,7 +138,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 - A CI matrix: the oldest supported pytest/xdist, the current releases, and pytest plus xdist `main` nightly.
 - Upper-bound pins, raised only after the contract suite passes.
 - A parity job that runs a real slice of your suite under plain `-n`, under `--lanes`, and under `-n --lanes`, then diffs report-log.
-- Upstream candidates: a public per-context SetupState and fixture cache in pytest (removes P1, P2 and P6), a documented node protocol plus a lane-capable worker hook in xdist (removes X1–X3), and a `pop(..., None)` fix for `PYTEST_CURRENT_TEST`.
+- Upstream candidates: a public per-context SetupState and fixture cache in pytest (removes P1, P2 and P6), a documented node protocol plus a lane-capable worker hook in xdist (removes X1–X4), and a `pop(..., None)` fix for `PYTEST_CURRENT_TEST`.
 
 ## Not yet tested
 

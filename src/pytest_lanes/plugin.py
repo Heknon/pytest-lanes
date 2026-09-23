@@ -28,7 +28,7 @@ from __future__ import annotations
 import pytest
 
 from .controller import LanesController
-from .probes import check_touchpoints
+from .probes import check_controller_touchpoints, check_touchpoints
 from .scheduling import SUPPORTED_DIST
 from .single import SingleProcessSession
 from .worker import HybridWorkerSession
@@ -76,6 +76,7 @@ def pytest_configure(config):
         pm.register(HybridWorkerSession(config), "lanes-session")
     elif getattr(config.option, "numprocesses", None) or getattr(config.option, "tx", None):
         # Hybrid, controller side: real xdist DSession and processes; lanes are virtual nodes.
+        check_controller_touchpoints(config)
         pm.register(LanesController(config), "lanes-controller")
     else:
         check_touchpoints(config)
