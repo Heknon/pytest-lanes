@@ -28,7 +28,7 @@ The same `EnvScheduling` instance logic runs in all three modes. An environment 
 
 - The main thread plays xdist's controller: `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, and shutdown once `tests_finished` is true.
 - Each `ThreadNode` implements the four members xdist's `load*` schedulers use (`gateway`, `shutting_down`, `send_runtest_some()`, `shutdown()`). It runs xdist's worker loop: lookahead to find `nextitem`, which drives teardown, until a SHUTDOWN marker arrives.
-- Report hooks are replayed on the main thread with `report.node` set to the lane. This follows xdist's controller/worker hook split exactly.
+- Report hooks are replayed on the main thread with `report.node` set to the lane. This follows xdist's controller/worker hook split exactly. The one exception is pytest's own `Session.pytest_runtest_logreport`, which counts failures for `-x`/`--maxfail`: it runs on the lane, under a lock, as it runs inside an xdist worker, so the failing test is torn down fully and the lane stops by itself.
 
 ### Hybrid (`-n P --lanes M`)
 

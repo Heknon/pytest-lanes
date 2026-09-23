@@ -94,7 +94,7 @@ def test_maxfail_stops_scheduling(pytester):
     )
     r = run(pytester, "--lanes", "2", "--lanes-dist", "loadgroup", "-x")
     r.assert_outcomes(failed=1)
-    assert r.ret == 1
+    assert r.ret == pytest.ExitCode.INTERRUPTED     # as xdist
 
 
 def test_rerunfailures_protocol_plugin(pytester):

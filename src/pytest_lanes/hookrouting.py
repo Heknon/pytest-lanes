@@ -7,10 +7,18 @@ and the main thread replays it in order. Reporters (terminal, junitxml,
 report-log, ...) therefore see one thread and a well-ordered stream, as they
 would on an xdist controller.
 
+One exception keeps xdist's worker semantics: in a worker, pytest's own ``Session``
+counts failures synchronously in ``pytest_runtest_logreport`` (``testsfailed``,
+``shouldfail`` for -x/--maxfail), and the runner reads ``shouldfail`` before tearing
+the failing test down. So the Session's implementation runs on the lane, at once
+and under a lock, and is left out of the replay.
+
 The hook call is intercepted at pluggy's ``PluginManager._inner_hookexec``, the
 same slot that pluggy's public ``add_hookcall_monitoring`` wraps.
 """
 from __future__ import annotations
+
+import threading
 
 from typing import NamedTuple
 
@@ -41,15 +49,17 @@ class ControllerHookRouter:
     string) is set in both modes.
     """
 
-    def __init__(self, pluginmanager, events, *, set_report_node: bool) -> None:
+    def __init__(self, pluginmanager, events, session, *, set_report_node: bool) -> None:
         self._pm = pluginmanager
         self._events = events
+        self._session = session
         self._set_report_node = set_report_node
         self._inner = None
 
     def __enter__(self):
         self._inner = inner = self._pm._inner_hookexec
-        events, set_report_node = self._events, self._set_report_node
+        events, session, set_report_node = self._events, self._session, self._set_report_node
+        session_lock = threading.Lock()
 
         def hookexec(name, impls, kwargs, firstresult):
             lane = LANE.get()
@@ -60,6 +70,11 @@ class ControllerHookRouter:
                 report.lane_id = lane.gateway.id
                 if set_report_node:
                     report.node = lane
+                on_lane = [i for i in impls if i.plugin is session]
+                if on_lane:
+                    with session_lock:
+                        inner(name, on_lane, kwargs, firstresult)
+                    impls = [i for i in impls if i.plugin is not session]
             events.put(HookCall(name, impls, kwargs, firstresult))
             return None if firstresult else []
 

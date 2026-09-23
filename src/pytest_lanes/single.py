@@ -54,10 +54,8 @@ class SingleProcessSession(LaneRunner):
                 for n in nodes:
                     node_hooks.down(node=n, error=None)
 
-        if session.shouldfail:
-            raise session.Failed(session.shouldfail)
-        if session.shouldstop:
-            raise session.Interrupted(session.shouldstop)
+        if session.shouldfail or session.shouldstop:   # xdist's DSession: Interrupted either way
+            raise session.Interrupted(session.shouldfail or session.shouldstop)
         return True
 
     def _run_parallel(self, session, nodes, items) -> None:

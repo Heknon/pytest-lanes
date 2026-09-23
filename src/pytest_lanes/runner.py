@@ -50,6 +50,7 @@ class LaneRunner:
         self.events: queue.Queue = queue.Queue()   # HookCall | ItemDone, consumed by _pump
         self.stop = threading.Event()              # -x / --maxfail reached
         self.errors: list = []                     # exceptions escaping a lane thread
+        self.teardown_errors: list = []            # (lane id, error) from teardown after a stop
         self.exclusive_lock = ReadWriteLock()
         self._session_stack = contextlib.ExitStack()
 
@@ -59,7 +60,7 @@ class LaneRunner:
         stack = self._session_stack
         self.lane_state = stack.enter_context(isolate_lanes(self.config, session))
         self.hooks = stack.enter_context(ControllerHookRouter(
-            self.config.pluginmanager, self.events, set_report_node=self.set_report_node))
+            self.config.pluginmanager, self.events, session, set_report_node=self.set_report_node))
 
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(self, session):
@@ -99,15 +100,19 @@ class LaneRunner:
         t.start()
         return t
 
+    def stopping(self, session) -> bool:
+        return self.stop.is_set() or bool(session.shouldfail or session.shouldstop)
+
     def _node_loop(self, node: ThreadNode, items) -> None:
         token = LANE.set(node)
         hook = self.config.hook
+        session = items[0].session if items else None
         try:
             nxt = node.queue.get()
             while nxt is not SHUTDOWN:
                 index = nxt
                 nxt = node.queue.get()          # lookahead decides nextitem (teardown scope)
-                if self.stop.is_set():
+                if self.stopping(session):
                     break
                 item = items[index]
                 nextitem = None if nxt is SHUTDOWN else items[nxt]
@@ -120,11 +125,32 @@ class LaneRunner:
                 ack = threading.Event()
                 self.events.put(ItemDone(node, index, time.perf_counter() - start, ack))
                 ack.wait()
-                if self.stop.is_set():
+                if self.stopping(session):      # as xdist's worker loop, after each item
                     break
-            node.setupstate.teardown_exact(None)
+            self._final_teardown(node)
         finally:
             LANE.reset(token)
+
+    def _final_teardown(self, node: ThreadNode) -> None:
+        """Tear down what the lane's last item left for its successor.
+
+        Normally a no-op: the last item ran with nextitem=None, or pytest tore it down
+        fully because the session was stopping. Only a lane that was between items
+        when the run stopped still holds fixtures; their errors are reported after
+        the run (``report_teardown_errors``), as plain pytest reports errors from its
+        own end-of-session teardown, instead of killing the lane as an INTERNALERROR.
+        """
+        try:
+            node.setupstate.teardown_exact(None)
+        except Exception as e:
+            self.teardown_errors.append((node.gateway.id, e))
+
+    def report_teardown_errors(self) -> None:
+        tr = self.config.pluginmanager.get_plugin("terminalreporter")
+        for lane_id, error in self.teardown_errors:
+            if tr is not None:
+                tr.write_line(f"ERROR tearing down lane {lane_id} after the run stopped: "
+                              f"{type(error).__name__}: {error}", red=True)
 
     def _pump(self, threads, sched, session, nodes, on_done=None, before_replay=None) -> None:
         """Main-thread event loop until every lane thread has exited.
@@ -159,6 +185,8 @@ class LaneRunner:
             event.ack.set()
         for t in threads:
             t.join()
+        self.report_teardown_errors()
+        self.teardown_errors.clear()
         if self.errors:
             raise self.errors[0]
 
