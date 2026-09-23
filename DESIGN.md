@@ -57,6 +57,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P7 | `config._tmp_path_factory` / `_tmpdirhandler` | A basetemp per lane, like xdist's per-worker basetemp; the process's basetemp is created under a lock |
 | P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it at every test phase; views are served from a copy so concurrent logger creation cannot break that |
 | P9 | `_pytest.doctest.DoctestItem` | Doctests run exclusively, because doctest swaps `sys.stdout` for the whole process |
+| P10 | `config.__class__` (per-lane `workerinput`/`workeroutput`) | Each lane is its own xdist worker for `worker_id`, `testrun_uid` and `xdist.get_xdist_worker_id()` |
 | C1 | pytest-rerunfailures `ClientStatusDB` | Hybrid only; its one per-worker socket is serialized across lanes |
 | X1 | xdist scheduler protocol | Semi-public; probed on each scheduler instance |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
@@ -155,7 +156,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F8 | **Ctrl-C** doesn't interrupt running tests. |
 | F9 | **`--lanes` means lanes per process in hybrid mode.** The total is `-n` × `--lanes`. |
 | F10 | **Wall-clock assertions in `tests/`** are load-sensitive. The round-1 intermittent failure was most likely the P7 basetemp race, now fixed. |
-| F11 | **Worker identity is per process, not per lane.** `worker_id` is `master` for every lane in single-process mode, and every lane of a hybrid worker sees that worker's id, as do `PYTEST_XDIST_WORKER` and `xdist.get_xdist_worker_id`. Resources named after the worker collide between concurrent lanes. Decision pending: see CLAUDE.md. |
+| F11 | **`PYTEST_XDIST_WORKER` is per process.** Fixed for `worker_id`, `testrun_uid`, `xdist.get_xdist_worker_id()` and `config.workerinput`, which name the lane (P10). An environment variable cannot differ per thread, so code that reads `PYTEST_XDIST_WORKER` (or `PYTEST_XDIST_WORKER_COUNT`) sees the process's value. Switch it to `worker_id` or `xdist.get_xdist_worker_id(request)`. |
 | F12 | **`pytest.warns`, `recwarn` and `warnings.catch_warnings` before Python 3.14** swap process-wide warning state: 5 of 6 concurrent `pytest.warns` blocks failed. On 3.14+ with context-aware warnings they are safe. |
 | F13 | **pytest-timeout in single-process mode** cannot use signals on a lane thread, so it falls back to its thread method, which `os._exit`s the whole process: one timeout ends every lane, with no reports written. `faulthandler_timeout` is silently ineffective under lanes, because the timer is process-wide and every test resets it. Backlog item 3 (`--lanes-timeout`) is the real fix. |
 | F14 | **`signal.signal` in a test raises `ValueError`** under lanes: Python allows it on the main thread only. |

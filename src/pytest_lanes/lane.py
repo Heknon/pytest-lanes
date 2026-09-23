@@ -39,9 +39,11 @@ class _Gateway:
 class ThreadNode:
     """A lane: an xdist WorkerController look-alike plus its private execution state."""
 
-    def __init__(self, id_: str, count: int, uid: str, setupstate, log_handlers: dict) -> None:
+    def __init__(self, id_: str, workerinput: dict, setupstate, log_handlers: dict) -> None:
         self.gateway = _Gateway(id_)
-        self.workerinput = {"workerid": id_, "workercount": count, "testrunuid": uid}
+        # What config.workerinput / workeroutput are on this lane (isolation.py, P10), so
+        # worker_id, testrun_uid and xdist.get_xdist_worker_id() name this lane.
+        self.workerinput = workerinput
         self.workeroutput: dict = {}
         # Same keys as xdist.remote.getinfodict(); pytest's reports.getworkerinfoline reads them.
         self.workerinfo = {

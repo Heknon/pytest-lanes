@@ -28,6 +28,12 @@ def find_worker_interactor(pluginmanager):
 class HybridWorkerSession(LaneRunner):
     set_report_node = False  # reports are serialized to the controller; use report.lane_id
 
+    def lane_workerinput(self, id_: str) -> dict:
+        """The process's workerinput (run id, plugin data), naming this lane and
+        counting every lane of the run, as controller.LaneProxy does."""
+        process = self.config.__dict__["workerinput"]
+        return {**process, "workerid": id_, "workercount": process["workercount"] * self.n}
+
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtestloop(self, session):
         interactor = find_worker_interactor(self.config.pluginmanager)

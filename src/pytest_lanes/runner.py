@@ -93,8 +93,12 @@ class LaneRunner:
 
     # ---- lanes ------------------------------------------------------------------
     def new_node(self, id_: str) -> ThreadNode:
-        return ThreadNode(id_, self.n, self.uid, setupstate=self.lane_state.setupstate(),
+        return ThreadNode(id_, self.lane_workerinput(id_), setupstate=self.lane_state.setupstate(),
                           log_handlers=self.lane_state.log_handlers())
+
+    def lane_workerinput(self, id_: str) -> dict:
+        """A lane's workerinput, shaped like the one xdist hands a worker."""
+        return {"workerid": id_, "workercount": self.n, "testrunuid": self.uid}
 
     def is_exclusive(self, item) -> bool:
         fixtures = set(self.config.getini("lanes_exclusive_fixtures"))

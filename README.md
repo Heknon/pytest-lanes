@@ -71,7 +71,7 @@ Tests in one scope run sequentially, in order, on one lane; different scopes run
 | `-s` / `--capture=no` | As under xdist: test output goes straight to the terminal. Log records are still captured per test |
 | `--lanes-xdist-node-hooks` + ini `lanes_node_hook_plugins` | Single-process mode: fire xdist's `pytest_testnodeready` / `testnodedown` for each lane, but only to the named plugins (default `conftest`) |
 
-Each test report carries `report.lane_id`, such as `ln3` or `gw2.ln3`. In single-process mode `report.node` is the lane, just as it is the worker under xdist.
+Each lane is its own xdist worker: `worker_id`, `testrun_uid`, `xdist.get_xdist_worker_id(request)` and `config.workerinput["workerid"]` give the lane, such as `ln3` or `gw2.ln3`, so resources named after the worker do not collide. The `PYTEST_XDIST_WORKER` environment variable is per process and cannot tell lanes apart. Each test report carries `report.lane_id`. In single-process mode `report.node` is the lane, just as it is the worker under xdist.
 
 ### What you must know before pointing it at a real suite
 
@@ -107,7 +107,7 @@ Two problems have to be solved to run many pytest tests at once in one process:
 1. **pytest keeps per-run state that assumes one test at a time.** This covers `SetupState`, fixture caches, capture, log handlers and a couple of races. `isolation.py` and `capture.py` re-key each of these by the current lane, using a contextvar (`LANE`) that is set on each lane thread.
 2. **Reporters expect one thread and xdist's hook split.** xdist forwards exactly four hooks from workers to the controller: `pytest_runtest_logstart`, `logreport`, `logfinish` and `warning_recorded`. `hookrouting.py` intercepts those four on lanes, queues them, and the main thread replays them in order. Every other hook runs on the lane, as it would in a worker.
 
-Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P9, X1–X4, C1), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
+Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P10, X1–X4, C1), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
 
 ### The life of one test (`--lanes N`)
 
@@ -139,7 +139,7 @@ src/pytest_lanes/
   worker.py        -n P --lanes M, worker process                       (X2)
   controller.py    -n P --lanes M, controller: LanesController, LaneMux  (X3, X4)
   scheduling.py    building xdist's scheduler; loadgroup suffix          (X1, P5)
-  isolation.py     per-lane pytest state                                 (P1, P2, P6, P7)
+  isolation.py     per-lane pytest state and worker identity             (P1, P2, P6, P7, P10)
   capture.py       per-lane stdout/stderr and logging                    (P3, P8)
   hookrouting.py   the 4 controller hooks, replayed on the main thread   (P4)
   compat.py        shims for third-party plugins (pytest-rerunfailures)  (C1)

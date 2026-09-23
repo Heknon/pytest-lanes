@@ -9,6 +9,7 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P2 ``FixtureDef.cached_result`` / ``_finalizers``: fixture caches per lane.
 * P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
 * P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
+* P10 ``config.workerinput`` / ``workeroutput``: each lane is its own xdist worker.
 * P3 and P8 (logging) live in ``capture.py``; C1 (third-party plugins) in ``compat.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
@@ -201,6 +202,51 @@ def per_lane_basetemp(config):
         main.__dict__.pop("getbasetemp", None)
 
 
+# ------------------------------------------------------------ P10: worker identity
+def _lane_config_class(base: type) -> type:
+    """A subclass of the run's Config class whose workerinput/workeroutput are per lane.
+
+    xdist's worker_id and testrun_uid fixtures and xdist.get_xdist_worker_id() all
+    read ``config.workerinput``; suites name per-worker resources after them. On a
+    lane these return the lane's (``ThreadNode.workerinput``). Elsewhere they are
+    what they were: absent on the single-process main thread (it keeps the
+    controller role), the process's own in a hybrid worker.
+    """
+
+    def per_lane(attr):
+        def get(self):
+            lane = LANE.get()
+            if lane is not None:
+                return getattr(lane, attr)
+            try:
+                return self.__dict__[attr]
+            except KeyError:
+                raise AttributeError(attr) from None
+
+        def set_(self, value):
+            self.__dict__[attr] = value
+
+        def delete(self):
+            del self.__dict__[attr]
+
+        return property(get, set_, delete)
+
+    return type(base.__name__, (base,), {
+        "__qualname__": base.__qualname__, "__module__": base.__module__,
+        "workerinput": per_lane("workerinput"), "workeroutput": per_lane("workeroutput"),
+    })
+
+
+@contextlib.contextmanager
+def per_lane_worker_identity(config):
+    original = type(config)
+    config.__class__ = _lane_config_class(original)
+    try:
+        yield
+    finally:
+        config.__class__ = original
+
+
 # ------------------------------------------------------------ all together
 @dataclass
 class LaneStateFactory:
@@ -222,6 +268,7 @@ def isolate_lanes(config, session):
     patch_fixturedef()                                                   # P2
     with contextlib.ExitStack() as stack:
         stack.enter_context(race_free_current_test_var())                # P6
+        stack.enter_context(per_lane_worker_identity(config))            # P10
         stack.enter_context(per_lane_basetemp(config))                   # P7
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
