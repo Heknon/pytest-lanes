@@ -60,10 +60,10 @@ Mode selection in `pytest_configure`:
 
 Other files:
 
-- `tests/test_contract.py` holds 21 pytester subprocess tests. These are the spec.
+- `tests/` is the spec: pytester subprocess tests (about 110) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes) and `test_isolation.py` (output, logging, basetemp, worker identity, warnings). Shared helpers live in `tests/lanes_testing.py`.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
-- `.github/workflows/ci.yml` is a draft CI workflow. It has never been run.
+- `.github/workflows/ci.yml` is a draft CI workflow, manual-only (`workflow_dispatch`): GitHub runners are paid.
 
 ## Internal touchpoints
 
@@ -92,7 +92,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
-.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings   # 21 tests, about 25s
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~110 tests, ~40s
 scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
@@ -107,6 +107,7 @@ Required flags and environment:
 
 ## Verified status
 
+- **Round 3 (edge-case sweep, 4-core container):** all tests pass on the full local matrix: CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1 and 9.1.1 / 3.8.0. The only skips are the two 3.14-only warnings tests on 3.12/3.13. Twelve bugs and four policy gaps were fixed, each test-first (DESIGN.md "Found and fixed in round 3"). The instrumentation plugin's smoke run has identical report-log output in all three modes.
 - **Round 2 (4-core container, uv):** all 18 tests pass (the 3.14 warnings test skips on 3.12/3.13) on CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, pytest 8.3.5 / xdist 3.6.1 and pytest 9.1.1 / xdist 3.8.0.
   - The 15 original tests did **not** pass reliably on 4 cores: the P7 basetemp race failed the hybrid tests in roughly half of all runs on every version, and the P6 `pop` race failed 2–5 tests per run on 3.14t. Both are fixed, with contract tests.
 - **Round 1 (Python 3.12, 1-core sandbox):** all 15 tests passed on pytest 8.0.2, 8.3.5 and 9.1.1, with xdist 3.6.1 and 3.8.0.
