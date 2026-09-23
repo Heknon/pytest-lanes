@@ -76,7 +76,7 @@ Each lane is its own xdist worker: `worker_id`, `testrun_uid`, `xdist.get_xdist_
 ### What you must know before pointing it at a real suite
 
 Lanes are threads, so anything process-global is shared between concurrently running tests. That includes `mock.patch`, monkeypatching shared modules, `os.environ`, `chdir`, signals, and logging levels. Mark such tests `lanes_exclusive`, or fix them. Other limits:
-- A hung thread cannot be killed.
+- A hung thread cannot be killed. pytest-timeout is refused in single-process mode (on a timeout it would end the whole process) but works in hybrid mode, where xdist replaces the worker. `faulthandler_timeout` is refused in both modes.
 - A crash takes down every lane in its process.
 - Output from threads your tests start is attributed to the test only on Python 3.14 with `-X thread_inherit_context=1`.
 - `--pdb` is unsupported, as it is under xdist. So is `--trace` in single-process mode.

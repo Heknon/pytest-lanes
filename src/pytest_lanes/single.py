@@ -15,6 +15,15 @@ from .runner import LaneRunner
 from .scheduling import add_group_suffix, make_scheduler
 
 
+def _timeout_marked(item) -> bool:
+    """Whether @pytest.mark.timeout gives this item a non-zero timeout."""
+    mark = item.get_closest_marker("timeout")
+    if mark is None:
+        return False
+    value = mark.args[0] if mark.args else mark.kwargs.get("timeout")
+    return bool(value)
+
+
 class SingleProcessSession(LaneRunner):
     set_report_node = True
 
@@ -25,6 +34,11 @@ class SingleProcessSession(LaneRunner):
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, config, items):
         from xdist.scheduler import LoadGroupScheduling
+
+        from .probes import PYTEST_TIMEOUT_REFUSED
+
+        if config.pluginmanager.get_plugin("timeout") is not None and any(map(_timeout_marked, items)):
+            raise pytest.UsageError(f"{PYTEST_TIMEOUT_REFUSED} (a test has @pytest.mark.timeout)")
 
         self.sched = make_scheduler(config, self.n)
         if isinstance(self.sched, LoadGroupScheduling):

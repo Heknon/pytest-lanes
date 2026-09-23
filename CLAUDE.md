@@ -130,7 +130,7 @@ These are not bugs to "fix" by weakening the invariants.
 - **Wall-clock assertions** (`r.duration < N`) in `tests/` are load-sensitive (backlog item 2). The earlier unreproduced flake was most likely the P7 basetemp race, which a 1-core box rarely hits.
 - **Round-3 findings still open (DESIGN.md F11–F16):**
   - `pytest.warns`/`catch_warnings` on Python ≤ 3.13;
-  - pytest-timeout kills the whole single-process run, and `faulthandler_timeout` is ineffective;
+  - per-test timeouts: pytest-timeout (single-process) and `faulthandler_timeout` are refused until `--lanes-timeout` (backlog 3);
   - `signal.signal` fails in lanes;
   - worker-side `logreport` consumers see reports late;
   - per-item overhead on GIL builds.

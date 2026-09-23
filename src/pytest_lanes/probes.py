@@ -122,6 +122,33 @@ def _warnings(config):
     return None
 
 
+PYTEST_TIMEOUT_REFUSED = (
+    "pytest-timeout is active with a timeout, and in single-process lanes it cannot use "
+    "signals: on a timeout it ends the whole process, every lane with it, with no reports. "
+    "Run hybrid (-n P --lanes M, where xdist replaces the worker) or turn the timeout off.")
+
+
+def _pytest_timeout(config):
+    if hasattr(config, "workerinput") or config.pluginmanager.get_plugin("timeout") is None:
+        return None                     # hybrid worker: xdist replaces a killed process
+    try:
+        from pytest_timeout import get_env_settings
+        timeout = get_env_settings(config).timeout
+    except Exception as e:  # fail closed: we cannot tell whether a timeout is set
+        return f"pytest-timeout is active and its settings could not be read ({e!r})"
+    return PYTEST_TIMEOUT_REFUSED if timeout else None
+
+
+def _faulthandler_timeout(config):
+    if config.pluginmanager.get_plugin("faulthandler") is None:
+        return None
+    if float(config.getini("faulthandler_timeout") or 0) > 0:
+        return ("faulthandler_timeout does not work under lanes: its timer is process-wide and "
+                "every test restarts or cancels it, so it never fires for the test that hangs. "
+                "Remove it for lanes runs.")
+    return None
+
+
 def _per_test_global_hooks(config):
     # pytest <= 8.3.5 swaps these global hooks around every test phase; newer pytest
     # installs them once (and has a module-level pytest_configure to do it).
@@ -137,7 +164,8 @@ def _per_test_global_hooks(config):
 
 CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
           _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
-          _p10_worker_identity, _x1_xdist_scheduler_api, _c1_rerunfailures_client)
+          _p10_worker_identity, _x1_xdist_scheduler_api, _c1_rerunfailures_client,
+          _pytest_timeout, _faulthandler_timeout)
 
 
 def check_touchpoints(config) -> None:
@@ -166,7 +194,7 @@ def _x4_worker_attributes(config):
     return None
 
 
-CONTROLLER_CHECKS = (_x3_handle_crashitem, _x4_worker_attributes)
+CONTROLLER_CHECKS = (_x3_handle_crashitem, _x4_worker_attributes, _faulthandler_timeout)
 
 
 def check_controller_touchpoints(config) -> None:
