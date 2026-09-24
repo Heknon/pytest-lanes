@@ -20,7 +20,7 @@ for py in "${PYTHONS[@]}"; do
     name=py$py-$(echo "$combo" | tr ' =' '_-' | cut -c1-60)
     venv="$ROOT/.matrix/$name"
     [ -d "$venv" ] || uv venv -q -p "$py" "$venv"
-    uv pip install -q -p "$venv/bin/python" $combo pytest-reportlog pytest-html pytest-timeout pytest-mock -e "$ROOT"
+    uv pip install -q -p "$venv/bin/python" $combo pytest-reportlog pytest-html pytest-timeout pytest-mock pytest-cov -e "$ROOT"
     for run in $(seq "$RUNS"); do
       echo "=== $("$venv/bin/python" -VV | head -1) | $combo | run $run/$RUNS"
       (cd "$ROOT" && "$venv/bin/python" -m pytest tests -q -p no:cacheprovider -p no:warnings) || rc=1

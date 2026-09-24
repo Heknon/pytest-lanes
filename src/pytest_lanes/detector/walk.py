@@ -35,8 +35,18 @@ _CALLABLES = (types.FunctionType, types.BuiltinFunctionType, types.MethodType,
 MAX_ITEMS = 1000
 
 
+def _plain(key) -> bool:
+    """A key whose repr is its identity: a scalar, text, or a tuple/frozenset of them."""
+    t = type(key)
+    if t in _SCALARS or t in _TEXT:
+        return True
+    if t is tuple or t is frozenset:
+        return all(_plain(k) for k in key)
+    return False
+
+
 def _label(key) -> str:
-    if type(key) in _TEXT or type(key) in _SCALARS:
+    if _plain(key):
         text = repr(key)
         return text if len(text) <= 80 else text[:77] + "..."
     return f"<{type(key).__name__}>"
@@ -95,11 +105,13 @@ class Snapshot(dict):
 
     unexpanded: frozenset = frozenset()
     truncated: bool = False
+    paths: dict = {}          # id(object) -> the path it was expanded at
 
     def covers(self, path: str, ancestors) -> bool:
-        """Would ``path`` be in this snapshot if it existed? No when the walk stopped at
-        its node cap, or did not expand an ancestor here (expanded at another path)."""
-        return not self.truncated and not any(a in self.unexpanded for a in ancestors(path))
+        """Would ``path`` be in this snapshot if it existed? No when the walk did not
+        look there: the path or an ancestor was refused at the node cap, or was not
+        expanded here (the object was expanded at another path)."""
+        return path not in self.unexpanded and not any(a in self.unexpanded for a in ancestors(path))
 
 
 def rebase(snapshot, old, new):
@@ -107,6 +119,7 @@ def rebase(snapshot, old, new):
     ``new`` (absent there: removed)."""
     result = Snapshot(snapshot)
     result.unexpanded, result.truncated = snapshot.unexpanded, snapshot.truncated
+    result.paths = snapshot.paths
     for path in old.keys() | new.keys():
         if old.get(path) != new.get(path):
             if path in new:
@@ -129,18 +142,20 @@ class Walker:
         self.max_nodes = max_nodes
         self.state: dict = {}
         self.unexpanded: set = set()
-        self._seen: set = set()
+        self._seen: dict = {}             # id(object) -> the path it was expanded at
         self.truncated = False
 
     def snapshot(self) -> Snapshot:
         snap = Snapshot(self.state)
         snap.unexpanded = frozenset(self.unexpanded)
         snap.truncated = self.truncated
+        snap.paths = self._seen
         return snap
 
     def visit(self, path: str, obj, depth: int = 0) -> None:
         if len(self.state) >= self.max_nodes:
             self.truncated = True
+            self.unexpanded.add(path)     # not looked at: absence here means nothing
             return
         try:
             self._visit(path, obj, depth)
@@ -177,7 +192,7 @@ class Walker:
                 state[path] = ("set", len(items), hash(scalars))
                 return
             if kind == "dict":
-                keys = frozenset(k for k, _ in items if type(k) in _SCALARS or type(k) in _TEXT)
+                keys = frozenset(k if _plain(k) else ("id", id(k)) for k, _ in items)
                 state[path] = ("dict", len(items), hash(keys), ident)
             else:
                 state[path] = ("seq", len(items), ident)
@@ -187,7 +202,7 @@ class Walker:
         if ident in self._seen or depth >= self.max_depth:
             self.unexpanded.add(path)
             return
-        self._seen.add(ident)
+        self._seen[ident] = path
         if kind == "class":
             self.walk_class(path, obj, depth)
         elif kind is None:

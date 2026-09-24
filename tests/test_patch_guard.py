@@ -397,3 +397,81 @@ def test_direct_environment_write_message_names_the_subprocess_hazard(pytester):
     r = run(pytester, "--lanes", "2", timeout=60)
     r.stdout.re_match_lines([r".*a write to os\.environ\['LANES_X'\] patches process-wide state.*"
                              r"breaks subprocesses.*Bad address"])
+
+
+# ---------------------------------------------------------------- round 7 review: false failures
+FORKED = """
+import os, multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+def child():
+    os.environ["CHILD_ONLY"] = "1"      # the child's own environment
+    os.chdir("/")
+def work(x):
+    os.environ["W"] = str(x)
+    return x
+def test_mp_fork():
+    p = mp.get_context("fork").Process(target=child)
+    p.start(); p.join()
+    assert p.exitcode == 0
+def test_pool_fork():
+    with ProcessPoolExecutor(2, mp_context=mp.get_context("fork")) as ex:
+        assert list(ex.map(work, range(3))) == [0, 1, 2]
+def test_raw_fork():
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.environ["X"] = "1"
+            os._exit(0)
+        except BaseException:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+"""
+
+
+@pytest.mark.parametrize("name", LANE_MODES)
+def test_forked_child_owns_its_environment(pytester, name):
+    # A child made by fork inherits the lane and the audit hook: its private environment
+    # write failed (round-7 review).
+    pytester.makepyfile(FORKED)
+    run(pytester, *LANE_MODES[name], timeout=60).assert_outcomes(passed=3)
+
+
+def test_chdir_to_the_current_directory_is_not_a_change(pytester):
+    # pytest-cov's no_cover pauses coverage inside os.chdir(topdir) and back: the same directory.
+    pytester.makepyfile("""
+        import contextlib, os
+        def test_it():
+            os.chdir(os.getcwd())
+            with contextlib.chdir("."):
+                pass
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)
+
+
+@pytest.mark.parametrize("name", LANE_MODES)
+def test_pytest_cov_keeps_working(pytester, name):
+    pytest.importorskip("pytest_cov")
+    pytester.makepyfile(mod="def f(x):\n    return x + 1\n", test_x="""
+        import pytest, mod
+        @pytest.mark.no_cover
+        def test_nc(): assert mod.f(1) == 2
+        def test_fixture(no_cover): assert mod.f(2) == 3
+        def test_cov(): assert mod.f(3) == 4
+    """)
+    r = run(pytester, *LANE_MODES[name], "--cov=mod", "--cov-report=term", "--cov-context=test", timeout=120)
+    r.assert_outcomes(passed=3)
+    r.stdout.fnmatch_lines(["mod.py *100%*"])
+
+
+def test_import_time_environment_default_is_allowed(pytester):
+    # A library that sets a default at import (thread-count knobs) failed whichever test
+    # imported it first: an innocent test, chosen by timing.
+    pytester.makepyfile(knobs="import os\nos.environ.setdefault('LANES_KNOB', '1')\n", test_x="""
+        import time, pytest
+        @pytest.mark.parametrize("i", range(4))
+        def test_it(i):
+            time.sleep(0.05)
+            import knobs
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=4)

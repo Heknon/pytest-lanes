@@ -168,8 +168,8 @@ def test_patches_inside_a_test_body_are_recorded(pytester):
     r, report = detect(pytester)
     r.assert_outcomes(passed=6)
     patched = findings(report, "patched")
-    assert patched["json.dumps"]["examples"] == ["test_a.py::test_mock"], report
-    assert "json.loads" in patched and "env:LANES_T" in patched, report
+    assert patched["module:json.dumps"]["examples"] == ["test_a.py::test_mock"], report
+    assert "module:json.loads" in patched and "env:LANES_T" in patched, report
     assert "env:LANES_E" in patched and "cwd" in patched, report
     assert not any("test_clean" in f["examples"] for f in report["findings"]), report
 
@@ -278,7 +278,7 @@ def test_a_patched_global_is_reported_once(pytester):
     """)
     _, report = detect(pytester)
     patched, per_test = findings(report, "patched"), findings(report, "per-test")
-    assert "infra.connect" in patched and "env:LANES_X" in patched, report
+    assert "module:infra.connect" in patched and "env:LANES_X" in patched, report
     assert "module:infra.connect" not in per_test and "env:LANES_X" not in per_test, report
 
 
@@ -448,7 +448,7 @@ def test_patches_of_test_local_objects_are_not_findings(pytester):
     unsafe = [f for f in report["findings"] if f["severity"] == "unsafe"]
     # The class patch, once, by its module-qualified name (so lanes_detect_ignore can match it).
     assert [(f["kind"], f["path"], f["nodeids"]) for f in unsafe] == [
-        ("patched", "test_a.Client.send", ["test_a.py::test_cls_attr"])], unsafe
+        ("patched", "module:test_a.Client.send", ["test_a.py::test_cls_attr"])], unsafe
 
 
 def test_wider_scoped_fixture_is_named_not_the_first_and_last_test(pytester):
@@ -487,3 +487,179 @@ def test_short_stdio_swap_is_recorded(pytester):
     """)
     r, report = detect(pytester)
     assert "sys.stdout" in findings(report, "patched"), report["findings"]
+
+
+# ---------------------------------------------------------------- round 7 review
+def test_deleted_sys_stdin_and_proxy_modules_do_not_crash(pytester):
+    pytester.makeconftest("""
+        import sys
+        class _Unbound:              # a context-local proxy in sys.modules
+            @property
+            def __dict__(self):
+                raise RuntimeError("working outside of application context")
+        sys.modules["app_context_proxy"] = _Unbound()
+    """)
+    pytester.makepyfile(test_a="""
+        import sys
+        from unittest import mock
+        class Local:
+            x = 0
+        def test_without_stdin(monkeypatch):
+            monkeypatch.delattr(sys, "stdin")
+            with open(__file__) as f:
+                assert f.read()
+        def test_monkeypatch_local_instance(monkeypatch):
+            obj = Local(); monkeypatch.setattr(obj, "x", 1)
+        def test_mock_local_instance():
+            obj = Local()
+            with mock.patch.object(obj, "x", 1):
+                pass
+    """)
+    r, report = detect(pytester)
+    r.assert_outcomes(passed=3)
+    # Deleting sys.stdin is a real process-wide patch; the local instances are not.
+    assert not [f for f in report["findings"] if f["kind"] == "patched"
+                and not f["path"].endswith("sys.stdin")], report
+
+
+FIXTURE_ORDER = {
+    "skipped_last_test": ("""
+        import pytest, state
+        @pytest.fixture(scope="module")
+        def conn():
+            state.X = object()
+            yield
+            state.X = None
+        def test_1(conn): pass
+        @pytest.mark.skip(reason="not today")
+        def test_2_skipped(): pass
+    """, "fixture conn (module scope)"),
+    "parametrized_module_fixture": ("""
+        import pytest, state
+        @pytest.fixture(scope="module", params=[1, 2])
+        def mod(request):
+            state.X = request.param
+            yield
+            state.X = None
+        def test_one(mod): pass
+        def test_two(mod): pass
+        def test_after(): pass
+    """, "fixture mod (module scope)"),
+    "teardowns_undone_in_reverse": ("""
+        import pytest, state
+        @pytest.fixture(scope="session")
+        def sess():
+            state.X = "session"
+            yield
+            state.X = None
+        @pytest.fixture(scope="module")
+        def mod(sess):
+            state.X = "module"
+            yield
+            state.X = "session"
+        def test_only(mod): pass
+    """, None),
+}
+
+
+@pytest.mark.parametrize("case", FIXTURE_ORDER)
+def test_wider_fixture_changes_never_blame_a_test(pytester, case):
+    source, fixture = FIXTURE_ORDER[case]
+    pytester.makepyfile(state="X = None\n", test_a=source)
+    r, report = detect(pytester)
+    assert report["unsafe_tests"] == [], report["findings"]
+    if fixture:
+        assert fixture in report["unsafe_fixtures"], report["findings"]
+
+
+def test_nested_fixture_request_is_not_counted_twice(pytester):
+    pytester.makepyfile(state="S = None\nX = None\n")
+    pytester.makeconftest("""
+        import pytest, state
+        @pytest.fixture(scope="session")
+        def sess():
+            state.S = "s"
+            yield
+            state.S = None
+        @pytest.fixture(scope="module")
+        def outer(request):
+            request.getfixturevalue("sess")
+            state.X = 1
+            yield
+            state.X = None
+    """)
+    pytester.makepyfile(test_a="def test_1(outer): pass\n")
+    _, report = detect(pytester)
+    assert findings(report, "per-test")["module:state.S"]["nodeids"] == ["fixture sess (session scope)"], report
+
+
+def test_node_cap_elsewhere_does_not_hide_a_change(pytester):
+    pytester.makeini("[pytest]\nlanes_detect_max_nodes = 5000\n")
+    pytester.makepyfile(aaa_state="class Registry: pass\nREG = Registry()\n",
+                        zzz_big="BIGS = [list(range(1000)) for _ in range(10)]\n")
+    pytester.makeconftest("""
+        import pytest, aaa_state, zzz_big
+        @pytest.fixture(autouse=True)
+        def current(request):
+            aaa_state.REG.current = request.node.nodeid
+            yield
+            del aaa_state.REG.current
+    """)
+    pytester.makepyfile(test_a="def test_1(): pass\ndef test_2(): pass\n")
+    _, report = detect(pytester)
+    assert report["truncated"]
+    assert "module:aaa_state.REG.current" in findings(report, "per-test"), report["findings"]
+
+
+def test_dict_keyed_by_tuples(pytester):
+    pytester.makepyfile(state="BY_TUPLE = {('seed',): True}\n", test_a="""
+        import state
+        def _t(n):
+            state.BY_TUPLE.clear(); state.BY_TUPLE[(n,)] = True
+        def test_1(): _t("t1")
+        def test_2(): _t("t2")
+    """)
+    _, report = detect(pytester)
+    assert "module:state.BY_TUPLE" in findings(report, "per-test"), report["findings"]
+
+
+def test_patch_labels_are_the_walked_paths(pytester):
+    # So one lanes_detect_ignore pattern covers a path whether patched or assigned.
+    pytester.makepyfile(infra="""
+        class Client:
+            def __init__(self): self.timeout = 1
+        class Holder:
+            def __init__(self): self.client = Client()
+        HOLDER = Holder()                  # the client is reachable only through HOLDER
+        TIMEOUT = 5
+        REG = {"a": 1}
+        def make_model(name):
+            class Model:
+                table = name
+            return Model
+        User = make_model("users")
+    """, test_a="""
+        from unittest import mock
+        import infra
+        def test_dotted():
+            with mock.patch("infra.TIMEOUT", 9): pass
+        def test_held_by_object():
+            with mock.patch.object(infra.HOLDER.client, "timeout", 3): pass
+        def test_dotted_instance_attr():
+            with mock.patch("infra.HOLDER.client.timeout", 4): pass
+        def test_patch_dict():
+            with mock.patch.dict(infra.REG, {"a": 2}): pass
+        def test_setitem(monkeypatch):
+            monkeypatch.setitem(infra.REG, "a", 3)
+        def test_factory_class(monkeypatch):
+            monkeypatch.setattr(infra.User, "table", "tmp")
+    """)
+    _, report = detect(pytester)
+    patched = findings(report, "patched")
+    for path, test in [("module:infra.TIMEOUT", "test_dotted"),
+                       ("module:infra.HOLDER.client.timeout", "test_held_by_object"),
+                       ("module:infra.REG", "test_patch_dict"),
+                       ("module:infra.REG['a']", "test_setitem"),
+                       ("module:infra.User.table", "test_factory_class")]:
+        assert path in patched and f"test_a.py::{test}" in patched[path]["nodeids"], (path, sorted(patched))
+    assert "test_a.py::test_dotted_instance_attr" in patched["module:infra.HOLDER.client.timeout"]["nodeids"]

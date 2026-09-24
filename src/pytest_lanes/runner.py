@@ -15,8 +15,10 @@
   are waited for up to the ``lanes_interrupt_grace`` ini (a second Ctrl-C stops
   waiting). A lane blocked in one long C call cannot be interrupted, and is named;
 * the exclusivity lock: tests that swap process-wide streams or warning state
-  run alone within their process. That is tests using capsys, capfd, recwarn (the
-  ``lanes_exclusive_fixtures`` ini), marked ``lanes_exclusive``, and doctests,
+  run alone within their process. That is tests using capsys, capfd, recwarn and
+  pytest-cov's no_cover (the ``lanes_exclusive_fixtures`` ini), marked
+  ``lanes_exclusive`` or ``no_cover`` (pytest-cov pauses coverage for the whole
+  process: tests on other lanes went unmeasured), and doctests,
   whose runner swaps ``sys.stdout``. A capture fixture requested at run time by a
   test that is not exclusive fails that test with instructions.
 """
@@ -124,6 +126,7 @@ class LaneRunner:
     def is_exclusive(self, item) -> bool:
         fixtures = set(self.config.getini("lanes_exclusive_fixtures"))
         return bool(item.get_closest_marker("lanes_exclusive")
+                    or item.get_closest_marker("no_cover")   # pytest-cov: see DEFAULT_EXCLUSIVE
                     or fixtures & set(getattr(item, "fixturenames", ()))
                     or is_doctest(item))
 

@@ -1,9 +1,10 @@
 """Contract tests: lanes must look like xdist --dist loadgroup to consumers."""
+import json
 import re
 import sys
 
 import pytest
-from lanes_testing import BASE, max_overlap, run, stamp_pids, stamps_dir
+from lanes_testing import BASE, max_overlap, report_log, run, stamp_pids, stamps_dir
 
 
 def test_groups_serial_across_parallel(pytester, monkeypatch):
@@ -415,6 +416,44 @@ def test_hybrid_worker_crash_is_reported_and_rescheduled(pytester):
     for env in ("envX", "envY", "envZ"):
         for step in (0, 1):
             r.stdout.fnmatch_lines([f"*PASSED*test_c?{env}-{step}?*"])
+
+
+def test_hybrid_crash_collateral_is_reported_and_rerun_under_loadscope(pytester):
+    # A loadscope-based scheduler (the user's EnvScheduling) requeues a crashed node's
+    # unfinished environments whole, starting at the step that was running: plain xdist
+    # reports its crashed test failed and runs it again. In hybrid mode the sibling lane's
+    # in-flight test (collateral) gets the same treatment, and every environment's steps
+    # still run in order, on one lane (round 7; DESIGN.md F5).
+    pytester.makeconftest(CUSTOM_SCHED)
+    pytester.makepyfile("""
+        import os, time, pytest
+        @pytest.mark.parametrize("env,step", [(e, i) for e in ("envP", "envQ") for i in range(3)],
+                                 ids=[f"{e}-{i}" for e in ("envP", "envQ") for i in range(3)])
+        def test_c(env, step, worker_id, tmp_path_factory):
+            root = tmp_path_factory.getbasetemp().parent
+            with open(root / "log", "a") as f:
+                f.write(f"{worker_id} {env}-{step}\\n")
+            if (env, step) == ("envQ", 1) and not (root / "crashed").exists():
+                time.sleep(0.3)                  # envP-0 is running on the other lane
+                (root / "crashed").write_text("x"); os._exit(1)
+            time.sleep(1 if env == "envP" else 0.05)
+    """)
+    result, _ = report_log(pytester, "-n", "1", "--lanes", "2", f"--basetemp={pytester.path / 'bt'}")
+    outcomes = {}
+    for e in map(json.loads, open(pytester.path / "rl.jsonl")):
+        if e.get("$report_type") == "TestReport" and e["when"] in ("call", "???"):  # ???: xdist's crash report
+            outcomes.setdefault(e["nodeid"].split("[")[1][:-1], []).append(e["outcome"])
+    assert outcomes["envQ-1"] == ["failed", "passed"], outcomes      # the culprit, as in xdist
+    assert outcomes["envP-0"] == ["failed", "passed"], outcomes      # the collateral (in flight)
+    assert all(v == ["passed"] for k, v in outcomes.items() if k not in ("envQ-1", "envP-0")), outcomes
+    runs = {}
+    for line in (pytester.path / "bt" / "log").read_text().splitlines():
+        worker, name = line.split()
+        env, step = name.split("-")
+        runs.setdefault((env, worker.split(".")[0]), []).append((int(step), worker))
+    for (env, _), steps in runs.items():                 # in order, one lane, per process
+        assert [s for s, _ in steps] == sorted(s for s, _ in steps), runs
+        assert len({w for _, w in steps}) == 1, runs
 
 
 def test_hybrid_capsys_runs_exclusively_inside_worker(pytester):

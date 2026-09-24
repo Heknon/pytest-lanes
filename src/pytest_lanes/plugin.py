@@ -37,7 +37,8 @@ from .scheduling import SUPPORTED_DIST
 from .single import SingleProcessSession
 from .worker import HybridWorkerSession
 
-DEFAULT_EXCLUSIVE = ("capsys", "capsysbinary", "capfd", "capfdbinary", "capteesys", "recwarn")
+DEFAULT_EXCLUSIVE = ("capsys", "capsysbinary", "capfd", "capfdbinary", "capteesys", "recwarn",
+                     "no_cover")   # pytest-cov: pauses coverage for the whole process
 
 
 def pytest_addoption(parser):

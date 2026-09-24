@@ -8,7 +8,8 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P1 ``session._setupstate``: one SetupState per lane.
 * P2 ``FixtureDef.cached_result`` / ``_finalizers`` / ``cached_param``: fixture caches per lane.
 * P6 ``_pytest.runner._update_current_test_var`` and ``os.environ``'s class:
-  ``PYTEST_CURRENT_TEST`` per lane, never written to the process environment.
+  ``PYTEST_CURRENT_TEST`` and the xdist worker variables per lane, never written to
+  the process environment.
 * P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
 * P10 ``config.workerinput`` / ``workeroutput``: each lane is its own xdist worker.
 * P11 ``_pytest.recwarn.WarningsRecorder.__enter__``: fail closed on pytest.warns
@@ -154,8 +155,17 @@ class _PerLaneAttribute:
             raise AttributeError(self.name) from None
 
 
-# ------------------------------------------------------------ P6: PYTEST_CURRENT_TEST
+# ------------------------------------------------------------ P6: per-lane environment
 CURRENT_TEST_VAR = "PYTEST_CURRENT_TEST"
+
+#: Environment variables whose value differs per lane, as it would per xdist worker:
+#: key -> the lane's value before any write (None: absent). os.environ on a lane shows
+#: these; they are never written to the process environment.
+PER_LANE_ENVIRON = {
+    CURRENT_TEST_VAR: lambda lane: None,
+    "PYTEST_XDIST_WORKER": lambda lane: lane.workerinput["workerid"],
+    "PYTEST_XDIST_WORKER_COUNT": lambda lane: str(lane.workerinput["workercount"]),
+}
 
 
 def current_test_value(item, when) -> str:
@@ -163,38 +173,45 @@ def current_test_value(item, when) -> str:
     return f"{item.nodeid} ({when})".replace("\x00", "(null)")
 
 
+def _lane_value(lane, key):
+    if key in lane.environ:
+        return lane.environ[key]
+    return PER_LANE_ENVIRON[key](lane)
+
+
 def _lane_environ_class(base):
-    """``os.environ``'s class, with ``PYTEST_CURRENT_TEST`` read and written per lane.
+    """``os.environ``'s class, with the ``PER_LANE_ENVIRON`` keys read and written per lane.
 
     Off a lane, and for every other key, it is ``base`` unchanged.
     """
-    def lane_or_none(key):
-        return LANE.get() if key == CURRENT_TEST_VAR else None
+    def lane_for(key):
+        return LANE.get() if key in PER_LANE_ENVIRON else None
 
     class LaneEnviron(base):
         def __getitem__(self, key):
-            lane = lane_or_none(key)
+            lane = lane_for(key)
             if lane is None:
                 return super().__getitem__(key)
-            if lane.current_test_var is None:
+            value = _lane_value(lane, key)
+            if value is None:
                 raise KeyError(key)
-            return lane.current_test_var
+            return value
 
         def __setitem__(self, key, value):
-            lane = lane_or_none(key)
+            lane = lane_for(key)
             if lane is None:
                 return super().__setitem__(key, value)
             if not isinstance(value, str):
                 raise TypeError(f"str expected, not {type(value).__name__}")
-            lane.current_test_var = value
+            lane.environ[key] = value
 
         def __delitem__(self, key):
-            lane = lane_or_none(key)
+            lane = lane_for(key)
             if lane is None:
                 return super().__delitem__(key)
-            if lane.current_test_var is None:
+            if _lane_value(lane, key) is None:
                 raise KeyError(key)
-            lane.current_test_var = None
+            lane.environ[key] = None
 
         def __iter__(self):
             lane = LANE.get()
@@ -202,10 +219,11 @@ def _lane_environ_class(base):
                 yield from super().__iter__()
                 return
             for key in list(super().__iter__()):
-                if key != CURRENT_TEST_VAR:
+                if key not in PER_LANE_ENVIRON:
                     yield key
-            if lane.current_test_var is not None:
-                yield CURRENT_TEST_VAR
+            for key in PER_LANE_ENVIRON:
+                if _lane_value(lane, key) is not None:
+                    yield key
 
         def __len__(self):
             return sum(1 for _ in self)
@@ -216,17 +234,21 @@ def _lane_environ_class(base):
 
 @contextlib.contextmanager
 def per_lane_current_test_var():
-    """``PYTEST_CURRENT_TEST`` per lane, kept out of the process environment.
+    """``PYTEST_CURRENT_TEST`` (and the xdist worker variables) per lane, kept out of
+    the process environment.
 
-    pytest sets and deletes it in ``os.environ`` at every phase: with many lanes the
-    process environment was rewritten constantly. A child started meanwhile with the
-    parent's environment (``subprocess`` without ``env=``) read it while it changed:
-    ``OSError: [Errno 14] Bad address`` (2 of 12 spawning tests beside 3,000 short
-    ones), or a torn environment. The shared value also named another lane's test
-    (F17), and ``pop`` without a default raised KeyError when two lanes finished
-    together. Now each lane keeps its own value, and ``os.environ`` (an instance of a
-    subclass installed for the session) returns it on that lane. Children started
-    without ``env=`` do not inherit it; ``env=os.environ.copy()`` passes the lane's.
+    pytest sets and deletes ``PYTEST_CURRENT_TEST`` in ``os.environ`` at every phase:
+    with many lanes the process environment was rewritten constantly. A child started
+    meanwhile with the parent's environment (``subprocess`` without ``env=``) read it
+    while it changed: ``OSError: [Errno 14] Bad address`` (2 of 12 spawning tests
+    beside 3,000 short ones), or a torn environment. The shared value also named
+    another lane's test (F17), and ``pop`` without a default raised KeyError when two
+    lanes finished together. Now each lane keeps its own value, and ``os.environ`` (an
+    instance of a subclass installed for the session) returns it on that lane.
+    ``PYTEST_XDIST_WORKER``/``_COUNT`` name the lane the same way (F11): suites name
+    databases and directories after them. Children started without ``env=`` see the
+    process's values (no ``PYTEST_CURRENT_TEST``: one inherited from a parent is removed
+    for the session); ``env=os.environ.copy()`` passes the lane's.
     """
     from _pytest import runner
 
@@ -236,9 +258,10 @@ def per_lane_current_test_var():
         lane = LANE.get()
         if lane is None:
             return original(item, when)
-        lane.current_test_var = current_test_value(item, when) if when else None
+        lane.environ[CURRENT_TEST_VAR] = current_test_value(item, when) if when else None
 
     base = type(os.environ)
+    inherited = os.environ.pop(CURRENT_TEST_VAR, None)   # a parent's (an outer pytest)
     runner._update_current_test_var = _update_current_test_var
     os.environ.__class__ = _lane_environ_class(base)
     try:
@@ -246,6 +269,8 @@ def per_lane_current_test_var():
     finally:
         os.environ.__class__ = base
         runner._update_current_test_var = original
+        if inherited is not None:
+            os.environ[CURRENT_TEST_VAR] = inherited
 
 
 # ------------------------------------------------------------ P7: basetemp
@@ -523,7 +548,7 @@ def _held_by_a_module(obj) -> bool:
     for module in list(sys.modules.values()):
         try:
             values = list(vars(module).values())
-        except TypeError:
+        except Exception:             # a proxy in sys.modules whose __dict__ raises
             continue
         if any(v is obj for v in values):
             return True
@@ -539,11 +564,29 @@ def _patch_by_path(patcher) -> bool:
     return any(isinstance(c.cell_contents, str) for c in cells)
 
 
+#: Callers whose process-wide writes are a required plugin's own business (invariant 4):
+#: pytest's twisted support (its unittest plugin patches twisted's Failure around each
+#: test), and pytest-cov/coverage (``no_cover`` pauses coverage inside ``os.chdir(topdir)``
+#: and back; pytest-cov < 7 with ``--cov-context=test`` writes ``COV_CORE_CONTEXT`` at
+#: every phase). Not the rest of pytest: pytester changes the cwd and environment for
+#: the whole process and stays guarded.
+EXEMPT_CALLERS = ("_pytest.unittest", "pytest_cov", "coverage")
+
+
 def _from_pytest(frame) -> bool:
-    """The patch is pytest's twisted support (its unittest plugin patches twisted's
-    Failure around each test). Only that module: pytester, also pytest's, changes the
-    cwd and environment for the whole process and stays guarded."""
-    return frame.f_globals.get("__name__") == "_pytest.unittest"
+    name = frame.f_globals.get("__name__") or ""
+    return any(name == m or name.startswith(m + ".") for m in EXEMPT_CALLERS)
+
+
+def _importing(frame) -> bool:
+    """A module being imported: a write at import time (a library setting a default,
+    ``os.environ.setdefault(...)``) happens once, in whichever test imports it first.
+    Failing it would blame an innocent test chosen by timing."""
+    while frame is not None:
+        if frame.f_code.co_filename.startswith("<frozen importlib._bootstrap"):
+            return True
+        frame = frame.f_back
+    return False
 
 
 
@@ -581,10 +624,12 @@ def guard_process_patches(config, is_exclusive):
 
     from unittest import mock
 
+    pid = os.getpid()
+
     def check(what: str, frame, note: str = "") -> None:
         lane = LANE.get()
-        if lane is None or _from_pytest(frame):
-            return
+        if lane is None or os.getpid() != pid or _from_pytest(frame):
+            return                      # (a forked child's state is its own)
         item = lane.current_item
         if item is None or lane.gateway.id == "ln-serial":   # the serial phase runs alone
             return
@@ -676,7 +721,14 @@ def guard_process_patches(config, is_exclusive):
         frame = sys._getframe(1)
         while frame is not None and frame.f_globals.get("__name__") == "os":
             frame = frame.f_back                        # os.environ's own methods
+        if _importing(frame):
+            return
         if event == "os.chdir":
+            try:
+                if os.path.samefile(args[0], "."):
+                    return                              # no change (pytest-cov's no_cover)
+            except (OSError, TypeError, ValueError):
+                pass
             check("os.chdir", frame)
             return
         key = args[0].decode(errors="replace") if isinstance(args[0], bytes) else args[0]

@@ -5,6 +5,7 @@ threading.Barrier across lanes rather than sleeps, so concurrency is guaranteed.
 Those tests run lanes in one process (ONE_PROCESS); plain xdist has no shared
 process, so there the barrier is off.
 """
+import os
 import re
 import sys
 
@@ -687,3 +688,36 @@ def test_changed_current_test_var_format_fails_closed(pytester):
     r = run(pytester, "--lanes", "2", timeout=60)
     assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str()
     assert "P6 PYTEST_CURRENT_TEST format changed" in r.stderr.str() + r.stdout.str()
+
+
+def test_children_do_not_inherit_an_outer_current_test_var(pytester, monkeypatch):
+    # Under an outer pytest (or any parent that set it), children started without env=
+    # reported the outer test's name (round-7 review).
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "outer")
+    pytester.makepyfile(test_x="""
+        import os, subprocess, sys
+        def test_it():
+            out = subprocess.run([sys.executable, "-c",
+                                  "import os; print(os.environ.get('PYTEST_CURRENT_TEST'))"],
+                                 capture_output=True, text=True).stdout.strip()
+            assert out == "None", out
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)
+    assert os.environ["PYTEST_CURRENT_TEST"] == "outer"      # (the outer process is untouched)
+
+
+@pytest.mark.parametrize("mode,count", [(["--lanes", "3"], "3"), (["-n", "2", "--lanes", "2"], "4")],
+                         ids=["lanes", "hybrid"])
+def test_xdist_worker_environment_variables_name_the_lane(pytester, mode, count):
+    # Suites name databases and directories after PYTEST_XDIST_WORKER: shared by every
+    # lane of a process, they collided silently (F11).
+    pytester.makepyfile(test_x="""
+        import os, time, pytest
+        @pytest.mark.parametrize("i", range(8))
+        def test_it(i, worker_id):
+            for _ in range(20):
+                assert os.environ["PYTEST_XDIST_WORKER"] == worker_id
+                assert os.getenv("PYTEST_XDIST_WORKER_COUNT") == "%s"
+                time.sleep(0.005)
+    """ % count)
+    run(pytester, *mode, timeout=60).assert_outcomes(passed=8)

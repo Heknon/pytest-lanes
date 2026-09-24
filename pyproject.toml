@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest-reportlog", "pytest-rerunfailures", "pytest-html", "pytest-timeout", "pytest-mock"]
+test = ["pytest-reportlog", "pytest-rerunfailures", "pytest-html", "pytest-timeout", "pytest-mock", "pytest-cov"]
 
 [project.entry-points.pytest11]
 lanes = "pytest_lanes.plugin"

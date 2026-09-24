@@ -37,8 +37,9 @@ class SharedStateDetector:
         self.collector = Collector(config.getini("lanes_detect_ignore"))
         self.recorder = Recorder()
         self._during: dict = {}
-        self._setups: list = []      # (before, after) of wider-scoped fixture setups in this test
-        self._teardowns: list = []   # (before, after) of their teardowns
+        self._events: list = []      # (before, after) of wider-scoped fixture setups/teardowns
+        self._cut = None             # how many of them happened before the call phase ended
+        self._open: list = []        # wider-scoped fixture setups in progress
         self._paths = 0
         self._installed = None
 
@@ -54,23 +55,33 @@ class SharedStateDetector:
     @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_runtest_protocol(self, item, nextitem):
         before = self.sources.snapshot()
+        self.recorder.paths = before.paths
         self._during.pop(item.nodeid, None)
-        self._setups, self._teardowns = [], []
+        self._events, self._cut, self._open = [], None, []
         self.recorder.start()
         try:
             return (yield)
         finally:
             patched = self.recorder.stop()
             after = self.sources.snapshot()
+            # What a wider-scoped fixture set up or tore down during this test is the
+            # fixture's, not the test's. Changes before the call phase ended (setups, and
+            # a parametrized fixture's teardown before its next instance) move the start
+            # forward; the ones after it are undone, latest first.
+            cut = len(self._events) if self._cut is None else self._cut
+            for old, new in self._events[:cut]:
+                before = rebase(before, old, new)
+            for old, new in reversed(self._events[cut:]):
+                after = rebase(after, new, old)
             during = self._during.pop(item.nodeid, after)
             self._paths = max(self._paths, len(after))
-            # What a wider-scoped fixture set up or tore down during this test is the
-            # fixture's, not the test's (it was reported against the first and last test).
-            for old, new in self._setups:
-                before = rebase(before, old, new)
-            for old, new in self._teardowns:
-                after = rebase(after, new, old)
             self.collector.add_test(item.nodeid, before, during, after, patched)
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        if self._cut is None:           # no call phase (skipped, or setup failed)
+            self._cut = len(self._events)
+        return (yield)
 
     @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_fixture_setup(self, fixturedef, request):
@@ -78,13 +89,14 @@ class SharedStateDetector:
         if fixturedef.scope == "function" or not self.recorder._active:
             return (yield)
         label = f"fixture {fixturedef.argname} ({fixturedef.scope} scope)"
-        before = self.sources.snapshot()
+        start = {"before": self.sources.snapshot()}
         patches = set(self.recorder.targets)
+        self._open.append(start)
         state: dict = {}
 
         def after_teardown():
             end = self.sources.snapshot()
-            self._teardowns.append((state["start"], end))
+            self._event(state["start"], end)
             self.collector.add_fixture(label, state["start"], end)
 
         def before_teardown():
@@ -94,11 +106,19 @@ class SharedStateDetector:
         try:                                        # this one after the fixture's own
             return (yield)
         finally:
+            self._open = [o for o in self._open if o is not start]   # (by identity)
             after = self.sources.snapshot()
-            self._setups.append((before, after))
-            self.collector.add_fixture(label, before, after,
+            self._event(start["before"], after)
+            self.collector.add_fixture(label, start["before"], after,
                                        self.recorder.take(self.recorder.targets - patches))
             fixturedef.addfinalizer(before_teardown)  # and this one before it
+
+    def _event(self, old, new) -> None:
+        """A wider-scoped fixture changed ``old`` into ``new``. A fixture whose setup is
+        still running (it requested this one) must not count it as its own."""
+        self._events.append((old, new))
+        for enclosing in self._open:
+            enclosing["before"] = rebase(enclosing["before"], old, new)
 
     @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_runtest_call(self, item):
@@ -106,6 +126,7 @@ class SharedStateDetector:
             return (yield)
         finally:
             self._during[item.nodeid] = self.sources.snapshot()   # fixtures still active
+            self._cut = len(self._events)
 
     def report(self) -> dict:
         findings = self.collector.findings()

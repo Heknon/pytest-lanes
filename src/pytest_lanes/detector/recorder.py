@@ -86,7 +86,7 @@ def _global_name(obj):
     for mod_name, module in sorted(list(sys.modules.items()), key=lambda kv: kv[0]):
         try:
             items = list(vars(module).items())
-        except TypeError:
+        except Exception:             # a proxy in sys.modules whose __dict__ raises
             continue
         for name, value in items:
             if value is obj:
@@ -94,25 +94,32 @@ def _global_name(obj):
     return None
 
 
-def _label(target, attribute=None):
-    """The recorded name of a shared patch target, or None for a test's own object
-    (the same judgement as the run-time patch guard, P14): ``module.attr``,
-    ``module.Class.attr``, or ``module.global.attr`` for an instance a module holds.
-    Module-qualified, so it matches the snapshot's ``module:`` paths and
-    ``lanes_detect_ignore`` patterns."""
+def _label(target, attribute=None, paths=None):
+    """The recorded name of a shared patch target, or None for a test's own object.
+
+    The path the snapshot walk reached the object at, when it did (``paths``: id ->
+    path, from the test's first snapshot), so a patch and an assignment of the same
+    thing share one name and one ``lanes_detect_ignore`` pattern: ``module:pkg.mod.attr``,
+    ``module:pkg.mod.HOLDER.client.timeout``. Otherwise the run-time guard's judgement
+    (P14): modules, classes and instances a module holds are shared, anything else is
+    presumed the test's own.
+    """
     from ..isolation import _shared
 
     t = type(target)
     if issubclass(t, types.ModuleType):
-        base = target.__name__
+        base = f"module:{target.__name__}"
+    elif paths and id(target) in paths:
+        base = paths[id(target)]
     elif issubclass(t, type):
         if not _shared(target):
             return None
-        base = f"{vars(target).get('__module__', '?')}.{target.__qualname__}"
+        base = f"module:{vars(target).get('__module__', '?')}.{target.__qualname__}"
     else:
-        base = _global_name(target)
-        if base is None:
+        name = _global_name(target)
+        if name is None:
             return None
+        base = f"module:{name}"
     return base if attribute is None else f"{base}.{attribute}"
 
 
@@ -131,6 +138,7 @@ class Recorder:
         self._poller_stop = threading.Event()
         self._redirect_targets: list = []    # active contextlib.redirect_* targets
         self._baseline: dict = {}
+        self.paths: dict = {}         # id -> walked path, from the test's first snapshot
 
     def add(self, target: str) -> None:
         if self._active and threading.current_thread() is self._owner:
@@ -167,7 +175,7 @@ class Recorder:
 
     # ---- stdio replacement, sampled while a test runs ---------------------------------
     def _start_poller(self) -> None:
-        self._baseline = {name: getattr(sys, name) for name in STDIO}
+        self._baseline = {name: getattr(sys, name, None) for name in STDIO}
         self._poller_stop = threading.Event()
 
         def poll():
@@ -182,7 +190,7 @@ class Recorder:
         audit event (``installed``), which catches swaps shorter than a poll."""
         baseline = self._baseline
         for name in STDIO:
-            current = getattr(sys, name)
+            current = getattr(sys, name, None)      # (a test may delete sys.stdin)
             if current is baseline[name] or any(current is t for t in self._redirect_targets):
                 continue
             if (type(current).__module__ or "").startswith("_pytest"):
@@ -211,9 +219,9 @@ class Recorder:
                 def __enter__(self):
                     from ..isolation import _patch_by_path
                     try:
-                        label = _label(self.getter(), self.attribute)
+                        label = _label(self.getter(), self.attribute, rec.paths)
                         if label is None and _patch_by_path(self):
-                            label = f"{_name(self.getter())}.{self.attribute}"
+                            label = f"module:{_name(self.getter())}.{self.attribute}"
                     except Exception:
                         label = f"?.{getattr(self, 'attribute', '?')}"
                     if label is not None:
@@ -234,9 +242,9 @@ class Recorder:
                         for key in self.values:
                             rec.add(f"env:{key}")
                         return rec.muted(original, self)
-                    label = target if isinstance(target, str) else _label(target)
+                    label = f"module:{target}" if isinstance(target, str) else _label(target, None, rec.paths)
                     if label is not None:
-                        rec.add(f"patch.dict({label})")
+                        rec.add(label)
                     return original(self)
                 return _patch_dict
 
@@ -256,9 +264,9 @@ class Recorder:
             def mp_setattr(original):
                 def setattr_(self, target, name=_NOTSET, value=_NOTSET, raising=True):
                     if isinstance(target, str) and value is _NOTSET:
-                        rec.add(target)
+                        rec.add(f"module:{target}")
                     else:
-                        label = _label(target, name)
+                        label = _label(target, name, rec.paths)
                         if label is not None:
                             rec.add(label)
                     args = [a for a in (name, value) if a is not _NOTSET]
@@ -267,8 +275,8 @@ class Recorder:
 
             def mp_delattr(original):
                 def delattr_(self, target, name=_NOTSET, raising=True):
-                    label = target if isinstance(target, str) and name is _NOTSET \
-                        else _label(target, name)
+                    label = f"module:{target}" if isinstance(target, str) and name is _NOTSET \
+                        else _label(target, name, rec.paths)
                     if label is not None:
                         rec.add(label)
                     args = [] if name is _NOTSET else [name]
@@ -277,7 +285,7 @@ class Recorder:
 
             def mp_item(original):
                 def item(self, dic, name, *args, **kwargs):
-                    label = "sys.modules" if dic is sys.modules else _label(dic)
+                    label = "sys.modules" if dic is sys.modules else _label(dic, None, rec.paths)
                     if dic is not os.environ and label is not None:
                         rec.add(f"{label}[{name!r}]")
                     return original(self, dic, name, *args, **kwargs)
