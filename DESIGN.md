@@ -164,6 +164,8 @@ Not a lanes defect: concurrent `config.cache` get/set across processes loses val
 
 Scale: 2,000 half-second tests ran in 7.9s on 500 lanes (88 MB) and 4.9s as 4 × 125, all passed.
 
+**Cycle 3 challenges** (no defect found): pytest-cov reports identical coverage (lines, branches, missing lines, including code run in child threads) under `-n 2`, `--lanes 3` and `-n 2 --lanes 2`; normalized junit XML (outcomes, messages, properties, captured out/err/log) is identical in hybrid mode, and in single-process mode except for one expected difference: pytest's warning that `record_property` is incompatible with `junit_family=xunit2` appears in the test's captured stderr, as in plain pytest, because the junitxml plugin is in the same process (under xdist it lives in the controller and workers never warn). The failure-instrumentation plugin with a custom scheduler has identical report-log in all three modes and does not trip the patch guard. Crash recovery (a test killing its worker once, with and without `--max-worker-restart`) matches xdist, except for crash collateral (F5, corrected: collateral tests are not rerun).
+
 ### Silent corruption is made loud
 
 A race that crashes is found. The dangerous kind would leave a run green while a report, an output or a fixture value belonged to another test. Two defences:
@@ -201,7 +203,7 @@ Each process costs one interpreter plus a full collection. That was about 40 MB 
 
 So choose P for isolation, and use lanes for throughput. Reasons to raise P:
 
-- **Crash blast radius.** One segfault or OOM fails every in-flight test in that process, so up to M−1 innocent tests are reported as crashed. They do rerun on the replacement worker, but their failure reports remain.
+- **Crash blast radius.** One segfault or OOM fails every in-flight test in that process, so up to M−1 innocent tests are reported as crashed, and they are **not** rerun (verified in round 5: xdist does not reschedule an item that was in flight when its worker died, and every sibling lane's item is such an item). With hour-long tests one crash can fail up to M−1 hours of work. The tests not yet started are rescheduled onto the replacement worker, as under xdist.
 - **Hang containment.** Threads can't be killed, but a process can. An external watchdog that kills a wedged worker lets xdist replace it and reschedule the work. This is the practical answer to hung tests.
 - **GIL headroom.** If each test's infrastructure spends a fraction c of its time on CPU, one process saturates at roughly 1/c concurrent lanes. For example, 2% CPU per test caps out around 50 lanes per core.
 - **Per-lane fixture memory,** which is multiplied by M within each process.
@@ -227,7 +229,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F2 | **Warnings:** `catch_warnings` isn't thread-safe before Python 3.14. Use `-X context_aware_warnings=1` on 3.14+ (the default on 3.14t), or `-p no:warnings`, which makes `filterwarnings` marks inert. |
 | F3 | **Output from threads your tests spawn** is only attributed with `-X thread_inherit_context=1` on Python 3.14. fd-level writes are never attributed per test. |
 | F4 | **Hung tests:** threads can't be killed. In hybrid mode, use a process watchdog. In single-process mode there's no answer yet. |
-| F5 | **Crash collateral:** in-flight tests on sibling lanes are reported as crashed. They rerun, but the reports remain. |
+| F5 | **Crash collateral:** in-flight tests on sibling lanes are reported as crashed and are not rerun (an earlier note here said they rerun; round 5 showed they do not). Which lane crashed the process cannot be told apart, so rerunning them all would also rerun the culprit. Backlog 6. |
 | F6 | **Exclusive tests pause lanes.** In hybrid mode an exclusive test waits for, and then blocks, every lane in its process; with hour-long tests that can drain the process for hours. Keep `capsys`/`capfd`/`recwarn` tests out of long suites, or run them in a separate plain invocation. |
 | F7 | **`each` and `worksteal` modes are unsupported.** worksteal is implementable. `--pdb` is unsupported, as it is under xdist. |
 | F8 | **Ctrl-C** interrupts every lane and runs its teardown (round 4); a lane blocked in one long C call cannot be interrupted and is abandoned after `lanes_interrupt_grace`, named. SIGTERM kills the process without teardown, as it does plain pytest. |
