@@ -501,3 +501,28 @@ def test_sys_stdout_behaves_like_a_real_stream(pytester, name):
             assert not sys.stdout.closed
     """)
     run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=4)
+
+
+@pytest.mark.parametrize("name", MODES.keys())
+def test_sys_stdout_is_not_the_terminal_outside_a_redirect(pytester, name):
+    # Outside a redirect, sys.stdout.fileno()/isatty() returned the real terminal's: fd
+    # writes escaped the test's report (single process: to the terminal; hybrid: lost)
+    # and colour detection turned on inside captured output (round-5 cycle-3 review).
+    # Like pytest's sys capture: not a tty, and no fd (so fd writes fail loudly).
+    pytester.makepyfile("""
+        import io, sys, pytest
+        def test_it():
+            assert sys.stdout.isatty() is False and sys.stderr.isatty() is False
+    """)
+    run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=1)
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "1", "--lanes", "3"]], ids=["lanes", "hybrid"])
+def test_stdout_has_no_fileno_on_a_lane(pytester, mode):
+    pytester.makepyfile("""
+        import io, sys, pytest
+        def test_it():
+            with pytest.raises(io.UnsupportedOperation):
+                sys.stdout.fileno()
+    """)
+    run(pytester, *mode, timeout=60).assert_outcomes(passed=1)

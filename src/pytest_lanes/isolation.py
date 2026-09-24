@@ -392,10 +392,18 @@ def _shared(target) -> bool:
         return True
     if not isinstance(target, type):
         return False
-    if "<locals>" not in getattr(target, "__qualname__", ""):
-        return True
+    # Shared when its module holds it: by its qualified name (nested classes too), or
+    # under any name (a factory's class assigned to a global). A class made in a test,
+    # by a class statement or by type(), is not reachable that way.
     module = sys.modules.get(getattr(target, "__module__", None) or "")
-    return module is not None and any(v is target for v in list(vars(module).values()))
+    if module is None:
+        return False
+    obj = module
+    for part in getattr(target, "__qualname__", "").split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            break
+    return obj is target or any(v is target for v in list(vars(module).values()))
 
 
 def _patch_by_path(patcher) -> bool:
@@ -445,13 +453,15 @@ def guard_process_patches(config, is_exclusive):
         item = lane.current_item
         if item is None or lane.gateway.id == "ln-serial":   # the serial phase runs alone
             return
+        if item.get_closest_marker("lanes_allow_patches"):   # the user vouches for them
+            return
         # A fixture broader than the test outlives it, so even an exclusive test's
         # module or session fixture leaves its patch in place for the lane's next tests
         # (hybrid mode runs exclusive tests between others).
         scope = lane.fixture_scopes[-1] if lane.fixture_scopes else "function"
         if scope in ("session", "package", "module", "class"):
             pytest.fail(PATCH_GUARD_SESSION_MESSAGE.format(what=what, scope=scope), pytrace=False)
-        if is_exclusive(item) or item.get_closest_marker("lanes_allow_patches"):
+        if is_exclusive(item):
             return
         pytest.fail(PATCH_GUARD_MESSAGE.format(what=what), pytrace=False)
 

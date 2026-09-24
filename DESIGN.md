@@ -164,6 +164,13 @@ Not a lanes defect: concurrent `config.cache` get/set across processes loses val
 
 Scale: 2,000 half-second tests ran in 7.9s on 500 lanes (88 MB) and 4.9s as 4 × 125, all passed.
 
+**Cycle 3** review (of cycle 2 and older code):
+
+18. **`lanes_allow_patches` stopped exempting module/class-scoped fixture patches** (item 16 moved the scope check first). The marker is checked first again; only exclusivity no longer exempts broader fixtures.
+19. **`sys.stdout.fileno()`/`isatty()` on a lane gave the real terminal's** (item 7 above): fd writes escaped the test's report (single process: to the terminal; hybrid: lost) and colour detection turned on in captured output. On a lane outside a redirect they now behave as pytest's sys capture: not a tty, no fd (`UnsupportedOperation`: loud, not misattributed).
+20. **An exception in a main-thread hook** (a plugin's `logreport`, a custom scheduler) abandoned every lane without teardown; xdist's workers tear down. It is now handled like Ctrl-C (lanes interrupted and torn down within the grace period), then re-raised as INTERNALERROR. An error while draining no longer skips the wait.
+21. **The patch guard flagged classes made with `type()` in a test.** A class is shared only if its module holds it (by qualified name, which covers nested classes, or under any name).
+
 **Cycle 3 challenges** (no defect found): pytest-cov reports identical coverage (lines, branches, missing lines, including code run in child threads) under `-n 2`, `--lanes 3` and `-n 2 --lanes 2`; normalized junit XML (outcomes, messages, properties, captured out/err/log) is identical in hybrid mode, and in single-process mode except for one expected difference: pytest's warning that `record_property` is incompatible with `junit_family=xunit2` appears in the test's captured stderr, as in plain pytest, because the junitxml plugin is in the same process (under xdist it lives in the controller and workers never warn). The failure-instrumentation plugin with a custom scheduler has identical report-log in all three modes and does not trip the patch guard. Crash recovery (a test killing its worker once, with and without `--max-worker-restart`) matches xdist, except for crash collateral (F5, corrected: collateral tests are not rerun).
 
 ### Silent corruption is made loud

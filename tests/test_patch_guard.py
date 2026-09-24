@@ -281,3 +281,54 @@ def test_factory_made_module_class_is_shared(pytester):
     """)
     r = run(pytester, "--lanes", "2", timeout=60)
     r.stdout.fnmatch_lines([GUARD_MESSAGE])
+
+
+def test_marker_exempts_broader_scoped_fixture_patches(pytester):
+    # The marker says this test's patches are safe; it stopped covering its module- and
+    # class-scoped fixtures when the scope check moved first (round-5 cycle-3 review).
+    pytester.makepyfile(helper_mod="VALUE = 0\n")
+    pytester.makepyfile("""
+        import pytest
+        from unittest import mock
+        import helper_mod
+        pytestmark = pytest.mark.lanes_allow_patches
+        @pytest.fixture(scope="module", autouse=True)
+        def mod_patch():
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(helper_mod, "VALUE", 1)
+                yield
+        class TestC:
+            @pytest.fixture(scope="class", autouse=True)
+            def cls_patch(self):
+                with mock.patch.object(helper_mod, "VALUE", 2):
+                    yield
+            def test_a(self): pass
+            def test_b(self): pass
+        def test_c(): pass
+        def test_d(): pass
+    """)
+    run(pytester, "--lanes", "3", "--lanes-dist", "loadscope", timeout=60).assert_outcomes(passed=4)
+
+
+def test_class_made_with_type_in_a_test_is_local(pytester):
+    pytester.makepyfile("""
+        from unittest import mock
+        def test_it():
+            Fake = type("Fake", (), {"x": 0})
+            with mock.patch.object(Fake, "x", 1):
+                assert Fake.x == 1
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)
+
+
+def test_nested_module_class_is_shared(pytester):
+    pytester.makepyfile(appnest="class Outer:\n    class Inner:\n        x = 0\n")
+    pytester.makepyfile("""
+        from unittest import mock
+        import appnest
+        def test_it():
+            with mock.patch.object(appnest.Outer.Inner, "x", 1):
+                pass
+    """)
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.stdout.fnmatch_lines([GUARD_MESSAGE])

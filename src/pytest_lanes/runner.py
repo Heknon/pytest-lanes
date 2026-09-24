@@ -233,6 +233,11 @@ class LaneRunner:
         except KeyboardInterrupt:
             self._interrupt(threads, nodes)
             raise
+        except BaseException:
+            # A main-thread hook failed (a plugin's logreport, a custom scheduler): the run
+            # ends with INTERNALERROR, but the lanes still tear down, as xdist's workers do.
+            self._interrupt(threads, nodes, reason="Internal error")
+            raise
         for t in threads:
             t.join()
         self.report_teardown_errors()
@@ -311,8 +316,8 @@ class LaneRunner:
             before_replay(call)
         self.hooks.replay(call)
 
-    def _interrupt(self, threads, nodes) -> None:
-        """Ctrl-C on the main thread: interrupt the lanes, let them tear down, wait."""
+    def _interrupt(self, threads, nodes, reason: str = "Interrupted") -> None:
+        """Ctrl-C (or a main-thread error): interrupt the lanes, let them tear down, wait."""
         self.interrupting = True
         self.stop.set()
         for n in nodes:
@@ -322,7 +327,7 @@ class LaneRunner:
             raise_in_thread(t, KeyboardInterrupt)
         grace = float(self.config.getini("lanes_interrupt_grace"))
         deadline = time.monotonic() + grace
-        self._say(f"Interrupted: stopping {len(running)} lane(s) and running their teardown "
+        self._say(f"{reason}: stopping {len(running)} lane(s) and running their teardown "
                   f"(up to {grace:g}s; press Ctrl-C again to stop waiting)")
         try:
             while any(t.is_alive() for t in running) and time.monotonic() < deadline:
@@ -330,7 +335,10 @@ class LaneRunner:
                     event = self.events.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                self._drain(event)             # reports of tests that did finish
+                try:
+                    self._drain(event)         # reports of tests that did finish
+                except Exception as e:         # keep draining: lanes wait for their acks
+                    self._say(f"error while stopping: {type(e).__name__}: {e}")
         except KeyboardInterrupt:
             pass
         left = [(n.gateway.id, n.current_item) for t, n in running.items() if t.is_alive()]

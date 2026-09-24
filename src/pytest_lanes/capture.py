@@ -81,14 +81,22 @@ class _LaneStream(io.TextIOBase):
             return target
         return self._real
 
+    # On a lane outside a redirect, sys.stdout is the lane's capture, as pytest's sys
+    # capture is: not a tty, and no fd. Handing out the real terminal's fd let output
+    # escape the test's report (or vanish, in a hybrid worker) and turned on colours.
     def fileno(self):
-        return self._stream("fileno").fileno()
+        redirected, target = self._redirect()
+        if redirected and target is not None:
+            return target.fileno()
+        if LANE.get() is None:
+            return self._real.fileno()
+        raise io.UnsupportedOperation("redirected stdout is pseudofile, has no fileno()")
 
     def isatty(self):
         redirected, target = self._redirect()
-        if redirected and target is None:
-            return False
-        return self._stream("isatty").isatty()
+        if redirected:
+            return bool(target is not None and target.isatty())
+        return self._real.isatty() if LANE.get() is None else False
 
     def writable(self):
         return True

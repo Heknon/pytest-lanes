@@ -500,3 +500,34 @@ def test_keyboard_interrupt_with_a_slow_reporter(pytester, mode):
     assert "did not stop" not in out, out
     # xdist reports the test that raised it as a crashed worker; no other test may be.
     assert not any("crashed" in line and "test_b" in line for line in out.splitlines()), out
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "2", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_error_in_a_reporter_still_tears_the_lanes_down(pytester, monkeypatch, mode):
+    # An exception in a main-thread hook (a plugin's logreport, a custom scheduler) left
+    # every lane without teardown; xdist's workers tear down (round-5 cycle-3 review).
+    monkeypatch.setenv("LANES_OUT", str(pytester.path))
+    pytester.makeconftest("""
+        import os, pathlib, pytest
+        OUT = pathlib.Path(os.environ["LANES_OUT"])
+        def pytest_runtest_logreport(report):
+            if report.when == "call" and "test_boom" in report.nodeid:
+                raise RuntimeError("reporter bug")
+        @pytest.fixture(scope="session", autouse=True)
+        def session_env(worker_id):
+            yield
+            (OUT / f"session-{worker_id}").write_text("x")
+    """)
+    pytester.makepyfile("""
+        import time, pytest
+        def test_boom():
+            time.sleep(0.3)
+        @pytest.mark.parametrize("i", range(4))
+        def test_slow(i):
+            time.sleep(1.5)
+    """)
+    r = run(pytester, *mode, timeout=120)
+    assert r.ret == pytest.ExitCode.INTERNAL_ERROR, r.stdout.str()
+    lanes = 3 if mode[0] == "--lanes" else 4
+    torn = list(pytester.path.glob("session-*"))
+    assert len(torn) >= min(lanes, 5) - 1, (torn, r.stdout.str()[-1500:])
