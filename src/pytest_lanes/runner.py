@@ -230,6 +230,12 @@ class LaneRunner:
         self.ledger.raise_if_violated()
 
     def _pump_events(self, threads, sched, session, nodes, on_done, before_replay) -> None:
+        by_id = {n.gateway.id: n for n in nodes}
+        # An exclusive test may redirect fd 1/2 for the process (capfd): output the main
+        # thread wrote meanwhile (the reporters') went into the test's capture. Its hook
+        # calls are held, in order, and replayed once it is done, as xdist's controller
+        # prints a worker's reports in another process.
+        held: dict = {}
         while True:
             try:
                 event = self.events.get(timeout=0.05)
@@ -238,11 +244,15 @@ class LaneRunner:
                     break
                 continue
             if isinstance(event, HookCall):
-                self.ledger.replayed(event.lane, event.name, event.kwargs)
-                if before_replay is not None:
-                    before_replay(event)
-                self.hooks.replay(event)
+                node = by_id.get(event.lane)
+                item = node.current_item if node is not None else None
+                if event.lane in held or (item is not None and self.is_exclusive(item)):
+                    held.setdefault(event.lane, []).append(event)
+                else:
+                    self._replay(event, before_replay)
                 continue
+            for call in held.pop(event.node.gateway.id, ()):
+                self._replay(call, before_replay)
             self.ledger.item_done(event.node.gateway.id, event.nodeid)
             if on_done is not None:
                 on_done(event.node, event.index, event.duration)
@@ -256,6 +266,12 @@ class LaneRunner:
                 for n in nodes:
                     n.shutdown()
             event.ack.set()
+
+    def _replay(self, call: HookCall, before_replay) -> None:
+        self.ledger.replayed(call.lane, call.name, call.kwargs)
+        if before_replay is not None:
+            before_replay(call)
+        self.hooks.replay(call)
 
     def _interrupt(self, threads, nodes) -> None:
         """Ctrl-C on the main thread: interrupt the lanes, let them tear down, wait."""

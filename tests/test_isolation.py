@@ -5,6 +5,7 @@ threading.Barrier across lanes rather than sleeps, so concurrency is guaranteed.
 Those tests run lanes in one process (ONE_PROCESS); plain xdist has no shared
 process, so there the barrier is off.
 """
+import re
 import sys
 
 import pytest
@@ -359,3 +360,32 @@ def test_setup_show_on_many_lanes(pytester, flag):
     """)
     r = run(pytester, "--lanes", "16", flag, timeout=120)
     assert r.ret == pytest.ExitCode.OK, r.stdout.str()[-2000:]
+
+
+# ---------------------------------------------------------------- exclusive tests and the terminal (round 4)
+@pytest.mark.parametrize("fixture", ["capfd", "capfdbinary"])
+def test_exclusive_capfd_test_does_not_capture_the_reporters(pytester, fixture):
+    # capfd redirects fd 1 for the whole process while a phase runs. The main thread
+    # replayed the test's earlier reports meanwhile, so the terminal reporter's "PASSED"
+    # (or any plugin's output) went into capfd: the test's readouterr() got it, and the
+    # terminal lost it (seen 4 in 15 runs on 3.14t). An exclusive test's hooks are now
+    # replayed once the test is done, as xdist's controller would print them.
+    pytester.makeconftest("""
+        import os, time
+        def pytest_runtest_logstart(nodeid, location):
+            time.sleep(0.3)                     # a busy main thread: the lane moves on meanwhile
+        def pytest_runtest_logreport(report):   # replayed on the main thread, like reporters
+            if report.when == "setup":
+                os.write(1, b"REPORT-SEEN\\n")
+    """)
+    pytester.makepyfile(f"""
+        import os, time
+        def test_fd({fixture}):
+            time.sleep(0.5)                     # the setup report is replayed meanwhile
+            os.write(1, b"raw")
+            out = {fixture}.readouterr().out
+            assert out in ("raw", b"raw"), out
+    """)
+    r = run(pytester, "--lanes", "2", "-v", timeout=60)
+    r.assert_outcomes(passed=1)
+    assert "REPORT-SEEN" in r.stdout.str(), r.stdout.str()
