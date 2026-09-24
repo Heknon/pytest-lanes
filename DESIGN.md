@@ -179,6 +179,17 @@ Scale: 2,000 half-second tests ran in 7.9s on 500 lanes (88 MB) and 4.9s as 4 ×
 25. **Non-propagating loggers were captured differently from pytest** (P3): lanes routed those that existed at session start; pytest 9 captures those that exist when each phase starts, pytest 8 none. Lanes now follow the installed pytest (detected from `catching_logs`), routing at each phase start on pytest 9 and only the root logger on pytest 8.
 26. **UTF-8 split across `sys.stdout.buffer` writes was mangled** (decoded per write); each lane decodes incrementally.
 
+**Cycle 5** review (hybrid controller, worker, scheduling, probes, not reviewed before):
+
+27. **A worker crash could end the whole run with INTERNALERROR.** `LaneMux.remove_node` removed the dead worker's lanes one by one, and each removal let the scheduler reschedule tests onto the dead worker's other lanes; sending to them raised `OSError` (82 of 600 tests ran). All its lanes are now marked shutting down before any is removed.
+28. **`config.workeroutput` written on a lane never reached the controller** (hybrid): each lane had a private dict. A hybrid worker's lanes share the process's, as an xdist worker's tests do.
+29. **The `@group` suffix followed the scheduler's class in single-process mode**; xdist's worker follows `--dist loadgroup`. A custom scheduler with `--dist loadgroup` lost the suffix (report parity). It now follows the chosen dist.
+30. **`--lanes-dist` was silently ignored in hybrid mode**; it is refused there (xdist's `--dist` applies).
+31. **Subclasses of `WorkStealingScheduling`/`EachScheduling` passed the startup check** and failed mid-run; the check covers the class hierarchy.
+32. **X2 was not probed**: a renamed `WorkerInteractor` or `item_index` would fail mid-run or silently. The hybrid worker now probes it at startup.
+
+The repeated full suite (3 runs each on 3.12 and 3.14t) and the full 12-combination matrix were clean.
+
 **Cycle 3 challenges** (no defect found): pytest-cov reports identical coverage (lines, branches, missing lines, including code run in child threads) under `-n 2`, `--lanes 3` and `-n 2 --lanes 2`; normalized junit XML (outcomes, messages, properties, captured out/err/log) is identical in hybrid mode, and in single-process mode except for one expected difference: pytest's warning that `record_property` is incompatible with `junit_family=xunit2` appears in the test's captured stderr, as in plain pytest, because the junitxml plugin is in the same process (under xdist it lives in the controller and workers never warn). The failure-instrumentation plugin with a custom scheduler has identical report-log in all three modes and does not trip the patch guard. Crash recovery (a test killing its worker once, with and without `--max-worker-restart`) matches xdist, except for crash collateral (F5, corrected: collateral tests are not rerun).
 
 ### Silent corruption is made loud
@@ -244,7 +255,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F2 | **Warnings:** `catch_warnings` isn't thread-safe before Python 3.14. Use `-X context_aware_warnings=1` on 3.14+ (the default on 3.14t), or `-p no:warnings`, which makes `filterwarnings` marks inert. |
 | F3 | **Output from threads your tests spawn** is only attributed with `-X thread_inherit_context=1` on Python 3.14. fd-level writes are never attributed per test. |
 | F4 | **Hung tests:** threads can't be killed. In hybrid mode, use a process watchdog. In single-process mode there's no answer yet. |
-| F5 | **Crash collateral:** in-flight tests on sibling lanes are reported as crashed and are not rerun (an earlier note here said they rerun; round 5 showed they do not). Which lane crashed the process cannot be told apart, so rerunning them all would also rerun the culprit. Backlog 6. |
+| F5 | **Crash collateral:** in-flight tests on sibling lanes are reported as crashed and are not rerun (an earlier note here said they rerun; round 5 showed they do not). Which lane crashed the process cannot be told apart, so rerunning them all would also rerun the culprit. Two more effects (round-5 cycle-5 review): under `--dist load`, a sibling lane's *next queued* test, not yet started, is reported crashed and dropped (xdist takes a node's first pending item as the one running); and a sibling test whose reports were sent but whose completion was not, when the process died, is reported crashed after passing and run again (31 passed for 30 tests). Backlog 6. |
 | F6 | **Exclusive tests pause lanes.** In hybrid mode an exclusive test waits for, and then blocks, every lane in its process; with hour-long tests that can drain the process for hours. Keep `capsys`/`capfd`/`recwarn` tests out of long suites, or run them in a separate plain invocation. |
 | F7 | **`each` and `worksteal` modes are unsupported.** worksteal is implementable. `--pdb` is unsupported, as it is under xdist. |
 | F8 | **Ctrl-C** interrupts every lane and runs its teardown (round 4); a lane blocked in one long C call cannot be interrupted and is abandoned after `lanes_interrupt_grace`, named. SIGTERM kills the process without teardown, as it does plain pytest. |

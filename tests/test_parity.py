@@ -161,3 +161,22 @@ def test_rerunfailures_under_concurrent_lanes_in_a_worker(pytester):
     assert "INTERNALERROR" not in r.stdout.str()
     outcomes = r.parseoutcomes()
     assert (outcomes.get("passed"), outcomes.get("rerun")) == (64, 64), outcomes
+
+
+@pytest.mark.parametrize("name", ["lanes", "hybrid"])
+def test_group_suffix_follows_dist_as_in_xdist(pytester, name):
+    # xdist's worker adds the @group suffix when --dist is loadgroup, whatever scheduler a
+    # conftest returns; single-process lanes decided by the scheduler's class instead.
+    from test_contract import CUSTOM_SCHED
+    pytester.makeconftest(CUSTOM_SCHED)
+    pytester.makepyfile("""
+        import pytest
+        @pytest.mark.xdist_group("g1")
+        @pytest.mark.parametrize("env", ["envA", "envB"])
+        def test_t(env):
+            pass
+    """)
+    xdist = report_log(pytester, *dist_args(MODES["xdist"], "loadgroup"))[1]
+    lanes = report_log(pytester, *dist_args(MODES[name], "loadgroup"))[1]
+    assert lanes == xdist
+    assert all(row[0].endswith("@g1") for row in xdist), xdist

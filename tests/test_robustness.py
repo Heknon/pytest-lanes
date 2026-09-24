@@ -592,3 +592,68 @@ def test_pytest_exit_tears_down_every_lane(pytester, monkeypatch, mode):
     run(pytester, *mode, timeout=60)
     torn = sorted(p.name for p in pytester.path.glob("torn-*"))
     assert len(torn) == 2, torn
+
+
+# ---------------------------------------------------------------- cycle-5 review (hybrid)
+def test_worker_crash_does_not_end_the_run(pytester, monkeypatch):
+    # Removing a dead worker's lanes one by one let xdist reschedule their tests onto the
+    # dead worker's other lanes; sending to them raised OSError, the run ended in
+    # INTERNALERROR and most tests never ran (82 of 600).
+    pytester.makepyfile("""
+        import os, time, pytest
+        @pytest.mark.parametrize("i", range(300))
+        def test_t(i, tmp_path_factory):
+            flag = tmp_path_factory.getbasetemp().parent / "crashed"
+            time.sleep(0.05)
+            if i == 40 and not flag.exists():
+                flag.write_text("x")
+                os._exit(1)
+    """)
+    r = run(pytester, "-n", "2", "--lanes", "2", "--dist", "load", timeout=180)
+    out = r.stdout.str()
+    assert "INTERNALERROR" not in out, out[-3000:]
+    assert r.ret == pytest.ExitCode.TESTS_FAILED, out[-2000:]
+    assert r.parseoutcomes().get("passed", 0) >= 290, out[-2000:]
+
+
+def test_workeroutput_written_on_a_lane_reaches_the_controller(pytester):
+    # Each lane wrote to a private workeroutput that never reached the controller
+    # (pytest_testnodedown); a hybrid worker's lanes now share the process's, as an
+    # xdist worker's tests do.
+    pytester.makeconftest("""
+        import pytest
+        @pytest.fixture(scope="session", autouse=True)
+        def note(request):
+            yield
+            request.config.workeroutput.setdefault("ran", []).append(request.config.workerinput["workerid"])
+        def pytest_testnodedown(node, error):
+            print("NODEDOWN", node.gateway.id, sorted(node.workeroutput.get("ran", ["<missing>"])))
+    """)
+    pytester.makepyfile("""
+        import pytest
+        @pytest.mark.parametrize("i", range(4))
+        def test_t(i):
+            pass
+    """)
+    r = run(pytester, "-n", "1", "--lanes", "2", "-s", timeout=60)
+    r.stdout.fnmatch_lines(["*NODEDOWN gw0 ['gw0.ln*"])
+
+
+def test_lanes_dist_is_refused_in_hybrid_mode(pytester):
+    pytester.makepyfile("def test_t(): pass\n")
+    r = run(pytester, "-n", "2", "--lanes", "2", "--lanes-dist", "loadfile", timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str()
+    r.stderr.fnmatch_lines(["*--lanes-dist*--dist*"])
+
+
+def test_subclass_of_an_unsupported_scheduler_is_refused_up_front(pytester):
+    pytester.makeconftest("""
+        from xdist.scheduler import WorkStealingScheduling
+        class Mine(WorkStealingScheduling):
+            pass
+        def pytest_xdist_make_scheduler(config, log):
+            return Mine(config, log)
+    """)
+    pytester.makepyfile("def test_t(): pass\n")
+    r = run(pytester, "--lanes", "2", timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str() + r.stderr.str()

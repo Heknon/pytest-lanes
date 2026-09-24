@@ -28,6 +28,13 @@ def find_worker_interactor(pluginmanager):
 class HybridWorkerSession(LaneRunner):
     set_report_node = False  # reports are serialized to the controller; use report.lane_id
 
+    def new_node(self, id_: str):
+        """As in an xdist worker, the process has one workeroutput: what its lanes write
+        there reaches the controller (pytest_testnodedown), instead of a private dict."""
+        node = super().new_node(id_)
+        node.workeroutput = self.config.__dict__["workeroutput"]
+        return node
+
     def lane_workerinput(self, id_: str) -> dict:
         """The process's workerinput (run id, plugin data), naming this lane and
         counting every lane of the run, as controller.LaneProxy does."""

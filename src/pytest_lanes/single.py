@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from .runner import LaneRunner
-from .scheduling import add_group_suffix, make_scheduler
+from .scheduling import add_group_suffix, builtin_dist, make_scheduler
 
 
 def _timeout_marked(item) -> bool:
@@ -33,15 +33,13 @@ class SingleProcessSession(LaneRunner):
 
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, config, items):
-        from xdist.scheduler import LoadGroupScheduling
-
         from .probes import PYTEST_TIMEOUT_REFUSED
 
         if config.pluginmanager.get_plugin("timeout") is not None and any(map(_timeout_marked, items)):
             raise pytest.UsageError(f"{PYTEST_TIMEOUT_REFUSED} (a test has @pytest.mark.timeout)")
 
         self.sched = make_scheduler(config, self.n)
-        if isinstance(self.sched, LoadGroupScheduling):
+        if builtin_dist(config) == "loadgroup":   # as xdist's worker: by --dist, not scheduler class
             add_group_suffix(items)
 
     @pytest.hookimpl(tryfirst=True)

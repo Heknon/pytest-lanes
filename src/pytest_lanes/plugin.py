@@ -111,6 +111,9 @@ def pytest_configure(config):
         pm.register(HybridWorkerSession(config), "lanes-session")
     elif getattr(config.option, "numprocesses", None) or getattr(config.option, "tx", None):
         # Hybrid, controller side: real xdist DSession and processes; lanes are virtual nodes.
+        if config.getoption("lanes_dist"):
+            raise pytest.UsageError("--lanes-dist chooses the scheduler of single-process lanes; "
+                                    "with -n it would be ignored: use xdist's --dist")
         check_controller_touchpoints(config)
         pm.register(LanesController(config), "lanes-controller")   # passes -X flags to workers
     else:

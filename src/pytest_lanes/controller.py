@@ -120,6 +120,10 @@ class LaneMux:
     def remove_node(self, wc):
         """A worker process died: remove all its lanes from the scheduler."""
         lanes = self.vnodes.pop(wc)
+        # All of them are dead: mark them first, or removing one lets the scheduler
+        # reschedule its tests onto a dead sibling (send fails: INTERNALERROR, run over).
+        for v in lanes:
+            v.shutting_down = True
         live = set(self.inner.nodes)
         crashes = [c for c in (self.inner.remove_node(v) for v in lanes if v in live) if c]
         if len(crashes) > 1:

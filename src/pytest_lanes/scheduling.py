@@ -30,9 +30,13 @@ SCHEDULER_PROTOCOL = ("add_node", "add_node_collection", "schedule", "mark_test_
 
 
 def reject_unsupported(sched) -> None:
-    name = type(sched).__name__
-    if name in UNSUPPORTED_SCHEDULERS:
-        raise pytest.UsageError(f"{name} is not supported by lanes")
+    """Refuse each/worksteal schedulers, subclasses included (by the class hierarchy's
+    names: xdist's classes are not importable by one path on every version)."""
+    names = {cls.__name__ for cls in type(sched).__mro__}
+    unsupported = names & set(UNSUPPORTED_SCHEDULERS)
+    if unsupported:
+        raise pytest.UsageError(f"{type(sched).__name__} ({', '.join(sorted(unsupported))}) "
+                                f"is not supported by lanes")
 
 
 def make_scheduler(config, numnodes: int):

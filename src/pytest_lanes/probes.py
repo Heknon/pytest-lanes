@@ -107,6 +107,22 @@ def _p13_redirect(config):
     return check_p13() if config.getoption("capture") != "no" else None
 
 
+def _x2_worker_interactor(config):
+    if not hasattr(config, "workerinput"):
+        return None                     # only a hybrid worker takes over xdist's loop
+    from .worker import find_worker_interactor
+
+    try:
+        interactor = find_worker_interactor(config.pluginmanager)
+    except StopIteration:
+        return "X2 xdist WorkerInteractor (not registered, or renamed)"
+    forward = getattr(type(interactor), "pytest_runtest_logreport", None)
+    if not (hasattr(interactor, "channel") and callable(getattr(interactor, "sendevent", None))
+            and forward is not None and "item_index" in forward.__code__.co_names):
+        return "X2 xdist WorkerInteractor.channel / .sendevent / .item_index"
+    return None
+
+
 def _p15_capture_suspend(config):
     from .capture import check_p15
 
@@ -207,6 +223,7 @@ def _per_test_global_hooks(config):
 CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
           _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
           _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect, _p14_patch_guard, _p15_capture_suspend,
+          _x2_worker_interactor,
           _x1_xdist_scheduler_api,
           _c1_rerunfailures_client,
           _pytest_timeout, _faulthandler_timeout)
