@@ -12,6 +12,7 @@ from .classify import NOTES, Collector, unsafe_tests
 from .recorder import Recorder, check_d1
 from .report import write_json, write_terminal
 from .sources import Sources
+from .walk import rebase
 
 CONCURRENT = ("--lanes-detect runs tests one at a time, to see what each test changes; "
               "run it without --lanes and -n")
@@ -36,6 +37,8 @@ class SharedStateDetector:
         self.collector = Collector(config.getini("lanes_detect_ignore"))
         self.recorder = Recorder()
         self._during: dict = {}
+        self._setups: list = []      # (before, after) of wider-scoped fixture setups in this test
+        self._teardowns: list = []   # (before, after) of their teardowns
         self._paths = 0
         self._installed = None
 
@@ -52,6 +55,7 @@ class SharedStateDetector:
     def pytest_runtest_protocol(self, item, nextitem):
         before = self.sources.snapshot()
         self._during.pop(item.nodeid, None)
+        self._setups, self._teardowns = [], []
         self.recorder.start()
         try:
             return (yield)
@@ -60,7 +64,41 @@ class SharedStateDetector:
             after = self.sources.snapshot()
             during = self._during.pop(item.nodeid, after)
             self._paths = max(self._paths, len(after))
+            # What a wider-scoped fixture set up or tore down during this test is the
+            # fixture's, not the test's (it was reported against the first and last test).
+            for old, new in self._setups:
+                before = rebase(before, old, new)
+            for old, new in self._teardowns:
+                after = rebase(after, new, old)
             self.collector.add_test(item.nodeid, before, during, after, patched)
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_fixture_setup(self, fixturedef, request):
+        """Snapshots around a session/package/module/class fixture's setup and teardown."""
+        if fixturedef.scope == "function" or not self.recorder._active:
+            return (yield)
+        label = f"fixture {fixturedef.argname} ({fixturedef.scope} scope)"
+        before = self.sources.snapshot()
+        patches = set(self.recorder.targets)
+        state: dict = {}
+
+        def after_teardown():
+            end = self.sources.snapshot()
+            self._teardowns.append((state["start"], end))
+            self.collector.add_fixture(label, state["start"], end)
+
+        def before_teardown():
+            state["start"] = self.sources.snapshot()
+
+        fixturedef.addfinalizer(after_teardown)     # finalizers run last-in, first-out:
+        try:                                        # this one after the fixture's own
+            return (yield)
+        finally:
+            after = self.sources.snapshot()
+            self._setups.append((before, after))
+            self.collector.add_fixture(label, before, after,
+                                       self.recorder.take(self.recorder.targets - patches))
+            fixturedef.addfinalizer(before_teardown)  # and this one before it
 
     @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_runtest_call(self, item):
@@ -73,7 +111,8 @@ class SharedStateDetector:
         findings = self.collector.findings()
         return {"tests": self.collector.tests, "paths": self._paths,
                 "truncated": self.sources.truncated, "findings": findings,
-                "unsafe_tests": unsafe_tests(findings), "notes": NOTES}
+                "unsafe_tests": unsafe_tests(findings),
+                "unsafe_fixtures": unsafe_tests(findings, fixtures=True), "notes": NOTES}
 
     def pytest_terminal_summary(self, terminalreporter):
         report = self.report()

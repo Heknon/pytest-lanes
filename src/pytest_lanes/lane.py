@@ -64,6 +64,7 @@ class ThreadNode:
         self.fixture_state = weakref.WeakKeyDictionary()   # FixtureDef -> [cached_result, finalizers]
         self.fixture_attrs = weakref.WeakKeyDictionary()   # FixtureDef -> {attr: value}
         self.fixture_scopes: list = []  # scopes of the fixtures being set up now (patch guard)
+        self.current_test_var = None    # this lane's PYTEST_CURRENT_TEST (isolation.py, P6)
         self.out = io.StringIO()
         self.err = io.StringIO()
         # contextlib.redirect_stdout/stderr targets entered on this lane, innermost last

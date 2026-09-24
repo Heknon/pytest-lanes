@@ -14,14 +14,24 @@ def write_terminal(tr, report: dict, json_path=None) -> None:
         tr.write_line(f"{report['tests']} tests, {report['paths']} paths watched: nothing unsafe found.")
     listed = [f for f in findings if f["severity"] != "ok"]
     if unsafe:
+        fixtures = len(report.get("unsafe_fixtures", ()))
         tr.write_line(f"{len(unsafe)} unsafe finding(s) in {len(report['unsafe_tests'])} of "
-                      f"{report['tests']} tests (all listed as unsafe_tests in the JSON report):",
+                      f"{report['tests']} tests"
+                      + (f" and {fixtures} wider-scoped fixture(s)" if fixtures else "")
+                      + " (listed as unsafe_tests and unsafe_fixtures in the JSON report):",
                       red=True)
     for f in listed:
         example = f["examples"][0] if f["examples"] else ""
         more = f" (+{f['tests'] - 1} more)" if f["tests"] > 1 else ""
         tr.write_line(f"{_LABEL[f['severity']]:<7}{f['kind']:<10}{f['path']}   {example}{more}",
                       red=f["severity"] == "unsafe", yellow=f["severity"] == "check")
+    if report.get("unsafe_fixtures"):
+        tr.write_line("Wider-scoped fixtures behind unsafe findings (each lane has its own copy, "
+                      "set up and torn down while other lanes run): "
+                      + ", ".join(report["unsafe_fixtures"]), red=True)
+    tr.write_line("Only state still changed when a test's call phase ends is compared: a value "
+                  "set and restored inside the test body (a context manager) is not seen, "
+                  "unless it is patched through mock or monkeypatch.")
     if report["truncated"]:
         tr.write_line("Snapshots were truncated at lanes_detect_max_nodes; some state was not watched.",
                       yellow=True)

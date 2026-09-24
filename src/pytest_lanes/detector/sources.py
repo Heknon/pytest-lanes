@@ -65,7 +65,7 @@ class Sources:
     def modules(self) -> list:
         found = []
         for name, module in sorted(list(sys.modules.items()), key=lambda kv: kv[0]):
-            if not isinstance(module, types.ModuleType) or _is_core(name):
+            if not issubclass(type(module), types.ModuleType) or _is_core(name):
                 continue
             if self._named(name) or self._under_rootdir(module):
                 found.append((name, module))
@@ -76,7 +76,7 @@ class Sources:
         found = []
         for name, plugin in sorted(((n or "", p) for n, p in pm.list_name_plugin() if p is not None),
                                    key=lambda np: np[0]):
-            if isinstance(plugin, types.ModuleType) or _is_core(type(plugin).__module__):
+            if issubclass(type(plugin), types.ModuleType) or _is_core(type(plugin).__module__):
                 continue
             found.append((name or type(plugin).__qualname__, plugin))
         return found
@@ -100,7 +100,7 @@ class Sources:
         for name, module in modules:
             self._walk_module(walker, name, module)
         self.truncated = self.truncated or walker.truncated
-        return walker.state
+        return walker.snapshot()
 
     def _walk_module(self, walker: Walker, name: str, module) -> None:
         try:
@@ -111,7 +111,7 @@ class Sources:
             if attr.startswith("__") and attr.endswith("__"):
                 continue
             path = f"module:{name}.{attr}"
-            if isinstance(value, type) and getattr(value, "__module__", None) != name:
+            if issubclass(type(value), type) and vars(value).get("__module__") != name:
                 walker.state[path] = ("class", id(value))   # walked where it is defined
                 continue
             walker.visit(path, value)

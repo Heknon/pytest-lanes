@@ -1,7 +1,10 @@
 """Turn per-test snapshot differences into findings.
 
 Each test gets three snapshots: before setup (A), after its call phase (B, with
-fixtures still active), and after teardown (C). For each path that differs:
+fixtures still active), and after teardown (C). A session, package, module or class
+fixture's setup and teardown are snapshotted too: their changes are reported under
+``fixture <name> (<scope> scope)``, not against the test that happened to run them.
+For each path that differs:
 
 * **temporary** in a test: A == C but A != B. The state was changed for the test
   and restored after. Under lanes, other tests see it meanwhile.
@@ -71,8 +74,13 @@ class Collector:
     def ignored(self, path: str) -> bool:
         return any(fnmatchcase(p, pat) for p in (path, *ancestors(path)) for pat in self.ignore)
 
-    def add_test(self, nodeid: str, a: dict, b: dict, c: dict, patched) -> None:
-        self.tests += 1
+    def add_fixture(self, label: str, before: dict, after: dict, patched=()) -> None:
+        """A wider-scoped fixture's setup or teardown changed ``before`` into ``after``."""
+        self.add_test(label, before, after, after, patched, count=False)
+
+    def add_test(self, nodeid: str, a: dict, b: dict, c: dict, patched, count: bool = True) -> None:
+        if count:
+            self.tests += 1
         changed = {k for k, _ in a.items() ^ b.items()} | {k for k, _ in a.items() ^ c.items()}
         env = {p for p in changed if p.startswith("env:")}
         if len(env) > ENV_BULK:
@@ -86,6 +94,10 @@ class Collector:
         if len(env) > ENV_BULK:
             patched = (patched - env) | {"env:*"}
         for path in changed:
+            # Absent from a snapshot that did not look there (node cap, or the object was
+            # expanded at another path in it): not a change.
+            if any(path not in s and not _covers(s, path) for s in (a, b, c)):
+                continue
             before, during, after = a.get(path), b.get(path), c.get(path)
             if before != after:
                 self._persisted[path].append((nodeid, before, after))
@@ -121,6 +133,11 @@ class Collector:
         return kept
 
 
+def _covers(snapshot, path: str) -> bool:
+    covers = getattr(snapshot, "covers", None)
+    return covers(path, ancestors) if covers else True
+
+
 def _grew(persisted) -> bool:
     for _, before, after in persisted:
         if not (before and after and before[0] in _CONTAINERS and after[0] == before[0]
@@ -134,6 +151,11 @@ def _finding(kind: str, path: str, nodeids: list) -> dict:
             "examples": nodeids[:EXAMPLES], "note": NOTES[kind], "nodeids": nodeids}
 
 
-def unsafe_tests(findings: list) -> list:
-    """Every test behind an unsafe finding: the candidates for lanes_exclusive."""
-    return sorted({n for f in findings if f["severity"] == "unsafe" for n in f["nodeids"]})
+FIXTURE = "fixture "
+
+
+def unsafe_tests(findings: list, fixtures: bool = False) -> list:
+    """Every test behind an unsafe finding: the candidates for lanes_exclusive. With
+    ``fixtures``, the wider-scoped fixtures behind one instead."""
+    return sorted({n for f in findings if f["severity"] == "unsafe" for n in f["nodeids"]
+                   if n.startswith(FIXTURE) == fixtures})

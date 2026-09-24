@@ -615,3 +615,75 @@ def test_warning_shown_on_one_lane_is_not_hidden_from_another(pytester, monkeypa
     base = [a for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:warnings") for a in pair]
     r = pytester.runpytest_subprocess(*base, *mode, timeout=120)
     r.assert_outcomes(passed=4, failed=4, warnings=r.parseoutcomes().get("warnings", 0))
+
+
+# ---------------------------------------------------------------- PYTEST_CURRENT_TEST (round 6)
+SPAWNER = """
+import subprocess, sys, pytest
+@pytest.mark.parametrize("i", range(12))
+def test_spawn(i):
+    sys.setswitchinterval(1e-6)
+    for _ in range(30):
+        out = subprocess.run([sys.executable, "-c", "print('ok')"], capture_output=True, text=True)
+        assert out.stdout == "ok\\n"
+@pytest.mark.parametrize("i", range(3000))
+def test_phase(i):          # constant phase changes on the other lanes
+    pass
+"""
+
+
+@pytest.mark.parametrize("name", ["lanes", "hybrid"])
+def test_subprocesses_spawn_while_other_lanes_change_phase(pytester, name):
+    # pytest set and deleted PYTEST_CURRENT_TEST in the process environment (putenv) at
+    # every phase of every lane; a child exec'ing with the parent's environment meanwhile
+    # failed with "OSError: [Errno 14] Bad address", or could get a torn environment.
+    pytester.makepyfile(test_x=SPAWNER)
+    r = run(pytester, *({"lanes": ["--lanes", "24"], "hybrid": ["-n", "2", "--lanes", "12"]}[name]),
+            timeout=300)
+    r.assert_outcomes(passed=3012)
+
+
+def test_current_test_var_is_per_lane_and_not_in_the_process_environment(pytester):
+    pytester.makepyfile(test_x="""
+        import ctypes, os, time, pytest
+        getenv = ctypes.CDLL(None).getenv
+        getenv.restype = ctypes.c_char_p
+        INHERITED = getenv(b"PYTEST_CURRENT_TEST")     # the outer pytest's, when run from tests/
+        @pytest.fixture
+        def fx(request):
+            assert os.environ["PYTEST_CURRENT_TEST"] == request.node.nodeid + " (setup)"
+            yield
+            assert os.environ["PYTEST_CURRENT_TEST"] == request.node.nodeid + " (teardown)"
+        @pytest.mark.parametrize("i", range(12))
+        def test_t(i, fx, request):
+            mine = request.node.nodeid + " (call)"
+            for _ in range(50):
+                assert os.environ["PYTEST_CURRENT_TEST"] == mine
+                assert os.getenv("PYTEST_CURRENT_TEST") == mine
+                assert os.environ.copy()["PYTEST_CURRENT_TEST"] == mine
+                assert "PYTEST_CURRENT_TEST" in os.environ and "PYTEST_CURRENT_TEST" in list(os.environ)
+                assert getenv(b"PYTEST_CURRENT_TEST") == INHERITED   # the C environment is untouched
+                time.sleep(0.002)
+        def test_zz_after():
+            pass
+    """)
+    r = run(pytester, "--lanes", "6", timeout=120)
+    r.assert_outcomes(passed=13)
+
+
+def test_changed_current_test_var_format_fails_closed(pytester):
+    # Lanes compute PYTEST_CURRENT_TEST themselves (P6): if pytest's value changes, refuse.
+    pytester.makeconftest("""
+        import os
+        from _pytest import runner
+        def _update_current_test_var(item, when):
+            if when:
+                os.environ["PYTEST_CURRENT_TEST"] = f"{item.nodeid} [{when}]".replace("\\x00", "")
+            else:
+                os.environ.pop("PYTEST_CURRENT_TEST")
+        runner._update_current_test_var = _update_current_test_var
+    """)
+    pytester.makepyfile(test_x="def test_t(): pass")
+    r = run(pytester, "--lanes", "2", timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str()
+    assert "P6 PYTEST_CURRENT_TEST format changed" in r.stderr.str() + r.stdout.str()

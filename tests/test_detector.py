@@ -331,3 +331,159 @@ def test_process_wide_setters_and_stdio_swaps_are_recorded(pytester):
     unsafe_tests = set(report["unsafe_tests"])
     assert "test_a.py::test_redirect_is_per_lane" not in unsafe_tests, report
     assert "test_a.py::test_private_rng_is_fine" not in unsafe_tests, report
+
+
+# ---------------------------------------------------------------- round 6 review
+def test_hostile_globals_neither_crash_nor_fail_tests(pytester):
+    # isinstance() reads __class__: a dead weakref.proxy or a werkzeug-like LocalProxy
+    # raised INTERNALERROR, and a spec'd mock passed isinstance(x, dict) and then broke
+    # dict.items(x), failing a passing test.
+    pytester.makepyfile(infra="""
+        import weakref
+        class Thing: pass
+        _t = Thing()
+        DEAD = weakref.proxy(_t)
+        del _t
+        class LocalProxy:
+            @property
+            def __class__(self):
+                raise RuntimeError("Working outside of application context")
+        request = LocalProxy()
+        REGISTRY = {"a": 1}
+        NAMES = ["a"]
+        TITLE = "t"
+    """, test_a="""
+        import infra
+        def test_spec_dict(mocker):
+            mocker.patch.object(infra, "REGISTRY", spec=dict)
+            mocker.patch.object(infra, "NAMES", spec=list)
+            mocker.patch.object(infra, "TITLE", spec=str)
+        def test_other():
+            pass
+    """)
+    r, report = detect(pytester)
+    r.assert_outcomes(passed=2)
+    assert "INTERNALERROR" not in r.stdout.str()
+
+
+def test_set_changed_by_a_background_thread(pytester):
+    pytester.makepyfile(infra="""
+        import sys, threading, time
+        sys.setswitchinterval(1e-5)
+        ACTIVE = set(range(5000))
+        def _churn():
+            i = 5000
+            while True:
+                for _ in range(500):
+                    ACTIVE.add(i); ACTIVE.discard(i - 5000); i += 1
+                time.sleep(0.0001)
+        threading.Thread(target=_churn, daemon=True).start()
+    """, test_a="""
+        import infra, pytest
+        @pytest.mark.parametrize("i", range(100))
+        def test_x(i): pass
+    """)
+    r, report = detect(pytester, timeout=120)
+    r.assert_outcomes(passed=100)
+    assert "INTERNALERROR" not in r.stdout.str()
+
+
+def test_node_cap_does_not_invent_findings(pytester):
+    pytester.makeini("[pytest]\nlanes_detect_max_nodes = 400\n")
+    pytester.makepyfile(aaa="LOG = []\n", zzz="\n".join(f"V{i} = {i}" for i in range(400)),
+                        test_a="""
+        import aaa, zzz, pytest
+        @pytest.fixture
+        def buf():
+            aaa.LOG.extend(range(20))
+            yield
+            aaa.LOG.clear()
+        @pytest.mark.parametrize("i", range(3))
+        def test_x(i, buf):
+            pass
+    """)
+    r, report = detect(pytester)
+    assert report["truncated"]
+    assert not [f for f in report["findings"] if "zzz" in f["path"]], report["findings"]
+
+
+def test_object_reached_by_two_paths_is_not_reported_as_changed(pytester):
+    pytester.makepyfile(aaa="current = None\n", zzz="""
+        class Env:
+            def __init__(self, name): self.name = name; self.hosts = ["h1", "h2"]
+        ENVS = [Env("e1"), Env("e2")]
+    """, test_a="""
+        import pytest, aaa, zzz
+        @pytest.fixture
+        def env():
+            aaa.current = zzz.ENVS[0]
+            yield
+            aaa.current = None
+        def test_x(env): pass
+    """)
+    r, report = detect(pytester)
+    assert set(findings(report, "per-test")) == {"module:aaa.current"}, report["findings"]
+
+
+def test_patches_of_test_local_objects_are_not_findings(pytester):
+    # The run-time guard (P14) allows them; the detector reported each as UNSAFE.
+    pytester.makepyfile(test_a="""
+        from unittest import mock
+        class Client:
+            def send(self): return 1
+        def test_local_instance(mocker, monkeypatch):
+            c = Client()
+            mocker.patch.object(c, "send", return_value=2)
+            monkeypatch.setattr(c, "timeout", 5, raising=False)
+            d = {}
+            monkeypatch.setitem(d, "k", 1)
+            with mock.patch.dict(d, {"x": 1}):
+                pass
+            assert c.send() == 2
+        def test_cls_attr(mocker):
+            mocker.patch.object(Client, "send")
+    """)
+    r, report = detect(pytester)
+    r.assert_outcomes(passed=2)
+    unsafe = [f for f in report["findings"] if f["severity"] == "unsafe"]
+    # The class patch, once, by its module-qualified name (so lanes_detect_ignore can match it).
+    assert [(f["kind"], f["path"], f["nodeids"]) for f in unsafe] == [
+        ("patched", "test_a.Client.send", ["test_a.py::test_cls_attr"])], unsafe
+
+
+def test_wider_scoped_fixture_is_named_not_the_first_and_last_test(pytester):
+    pytester.makepyfile(infra='MODE = "off"\n')
+    pytester.makeconftest("""
+        import pytest, infra
+        @pytest.fixture(scope="session", autouse=True)
+        def mode():
+            infra.MODE = "on"
+            yield
+            infra.MODE = "off"
+    """)
+    pytester.makepyfile(test_a="""
+        import infra
+        def test_1(): assert infra.MODE == "on"
+        def test_2(): assert infra.MODE == "on"
+        def test_3(): assert infra.MODE == "on"
+    """)
+    r, report = detect(pytester)
+    r.assert_outcomes(passed=3)
+    f = findings(report, "per-test")["module:infra.MODE"]
+    assert f["nodeids"] == ["fixture mode (session scope)"], f
+    assert report["unsafe_tests"] == [], report["unsafe_tests"]
+    assert "fixture mode (session scope)" in report["unsafe_fixtures"]
+
+
+def test_short_stdio_swap_is_recorded(pytester):
+    # The 1 ms poller missed a swap shorter than a GIL switch interval.
+    pytester.makepyfile(test_a="""
+        import io, os, sys
+        def test_swap():
+            old = sys.stdout
+            sys.stdout = io.StringIO()
+            open(os.devnull).close()       # any audited operation while it is swapped
+            sys.stdout = old
+    """)
+    r, report = detect(pytester)
+    assert "sys.stdout" in findings(report, "patched"), report["findings"]

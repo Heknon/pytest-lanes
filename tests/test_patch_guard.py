@@ -97,6 +97,33 @@ UNSAFE = {
         def test_it(patched):
             pass
     """,
+    # Direct writes (round 6): os.putenv/unsetenv/chdir audit events. Besides being seen by
+    # every lane, an environment write while another lane starts a subprocess made that
+    # spawn fail with "OSError: [Errno 14] Bad address".
+    "environ_direct_write": """
+        import os
+        def test_it():
+            os.environ["LANES_X"] = "1"
+    """,
+    "environ_direct_delete": """
+        import os
+        def test_it():
+            os.environ.pop("LANES_NOT_SET", None)
+            del os.environ["LANES_NOT_SET_EITHER"]
+    """,
+    "os_chdir_direct": """
+        import os
+        def test_it(tmp_path):
+            os.chdir(tmp_path)
+    """,
+    "session_fixture_env_direct": """
+        import os, pytest
+        @pytest.fixture(scope="session")
+        def env():
+            os.environ["LANES_X"] = "1"
+        def test_it(env):
+            pass
+    """,
 }
 
 SAFE = {
@@ -184,6 +211,8 @@ def test_opt_outs(pytester, opt_out):
         {mark.get(opt_out, "") if isinstance(opt_out, str) else ""}
         def test_it(monkeypatch):
             monkeypatch.setenv("LANES_X", "1")
+            import os
+            os.environ["LANES_Y"] = "1"
             with mock.patch("json.dumps", return_value="x"):
                 assert json.dumps(1) == "x"
     """)
@@ -345,3 +374,26 @@ def test_module_level_instance_is_shared(pytester):
     """)
     r = run(pytester, "--lanes", "2", timeout=60)
     r.stdout.fnmatch_lines([GUARD_MESSAGE])
+
+
+def test_environment_set_in_pytest_configure_is_fine(pytester):
+    # Before the lanes start, nothing else runs: the recommended place for run-wide values.
+    pytester.makeconftest("""
+        import os
+        def pytest_configure(config):
+            os.environ["LANES_RUN"] = "1"
+    """)
+    pytester.makepyfile("""
+        import os, pytest
+        @pytest.mark.parametrize("i", range(4))
+        def test_it(i):
+            assert os.environ["LANES_RUN"] == "1"
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=4)
+
+
+def test_direct_environment_write_message_names_the_subprocess_hazard(pytester):
+    pytester.makepyfile(UNSAFE["environ_direct_write"])
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.stdout.re_match_lines([r".*a write to os\.environ\['LANES_X'\] patches process-wide state.*"
+                             r"breaks subprocesses.*Bad address"])

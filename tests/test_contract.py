@@ -3,19 +3,22 @@ import re
 import sys
 
 import pytest
-from lanes_testing import BASE, run
+from lanes_testing import BASE, max_overlap, run, stamp_pids, stamps_dir
 
 
-def test_groups_serial_across_parallel(pytester):
+def test_groups_serial_across_parallel(pytester, monkeypatch):
+    stamps = stamps_dir(pytester, monkeypatch)
     pytester.makepyfile(
         """
         import time, pytest
+        from stamping import stamped
         SEEN = {}
         @pytest.mark.parametrize("g", "ABCD")
         @pytest.mark.parametrize("i", range(2))
         def test_x(g, i, request):
             request.node.add_marker(pytest.mark.xdist_group(name=g))
-            time.sleep(1)
+            with stamped(request):
+                time.sleep(1)
         """
     )
     # marks added at runtime are too late for scheduling -> use collection hook instead
@@ -29,7 +32,7 @@ def test_groups_serial_across_parallel(pytester):
     )
     r = run(pytester, "--lanes", "4", "--lanes-dist", "loadgroup", "-v")
     r.assert_outcomes(passed=8)
-    assert r.duration < 5, r.duration          # 4 lanes x 2 sequential x 1s ~= 2s
+    assert max_overlap(stamps) == 4           # the 4 groups ran in parallel, 2 tests each
 
 
 def test_session_fixture_is_per_lane_like_xdist_worker(pytester):
@@ -244,26 +247,29 @@ def pytest_xdist_make_scheduler(config, log):
 
 ENV_TESTS = """
 import os, time, threading, pytest
+from stamping import stamped
 RUNS = {}
 @pytest.mark.parametrize("step", range(3))
 @pytest.mark.parametrize("env", ["envA", "envB", "envC"])
-def test_step(env, step, worker_id):
+def test_step(env, step, worker_id, request):
     who = RUNS.setdefault(env, [])
     who.append((step, worker_id, os.getpid(), threading.get_ident()))
     assert [s for s, *_ in who] == list(range(step + 1))       # sequential within env
     assert len({w[1:] for w in who}) == 1                        # same worker for whole env
-    time.sleep(0.5)
+    with stamped(request):
+        time.sleep(0.5)
 """
 
 
 @pytest.mark.parametrize("mode", [["-n", "3"], ["--lanes", "3"]], ids=["xdist", "lanes"])
-def test_same_custom_scheduler_both_backends(pytester, mode):
+def test_same_custom_scheduler_both_backends(pytester, monkeypatch, mode):
     pytest.importorskip("xdist")
+    stamps = stamps_dir(pytester, monkeypatch)
     pytester.makeconftest(CUSTOM_SCHED)
     pytester.makepyfile(ENV_TESTS)
     r = run(pytester, *mode, "-v")
     r.assert_outcomes(passed=9)
-    assert r.duration < 4.5, r.duration     # 3 envs in parallel, 3 x 0.5s each
+    assert max_overlap(stamps) == 3         # the 3 envs ran in parallel, each in order
 
 
 NODE_INSPECTING_SCHED = """
@@ -333,21 +339,25 @@ def test_report_parity_with_xdist_loadgroup(pytester):
 
 
 # ------------------------------------------------------------ hybrid: -n N --lanes M
-def test_hybrid_custom_scheduler_pins_env_to_one_lane(pytester):
+def test_hybrid_custom_scheduler_pins_env_to_one_lane(pytester, monkeypatch):
     pytest.importorskip("xdist")
+    stamps = stamps_dir(pytester, monkeypatch)
     pytester.makeconftest(CUSTOM_SCHED)
     pytester.makepyfile("""
         import os, threading, time, pytest
+        from stamping import stamped
         @pytest.mark.parametrize("step", range(3))
         @pytest.mark.parametrize("env", [f"env{c}" for c in "ABCDEF"])
-        def test_step(env, step, tmp_path_factory):
+        def test_step(env, step, tmp_path_factory, request):
             d = tmp_path_factory.getbasetemp().parent
             (d / f"{env}-{step}").write_text(f"{os.getpid()}|{threading.current_thread().name}|{time.time()}")
-            time.sleep(0.5)
+            with stamped(request):
+                time.sleep(0.5)
     """)
     r = run(pytester, "-n", "2", "--lanes", "3", f"--basetemp={pytester.path / 'bt'}")
     r.assert_outcomes(passed=18)
-    assert r.duration < 5, r.duration                 # 6 envs on 6 lanes: ~3 x 0.5s
+    # 6 envs on 6 lanes: each process ran its 3 lanes at once
+    assert [max_overlap(stamps, pid) for pid in sorted(stamp_pids(stamps))] == [3, 3]
     runs = {}
     for f in (pytester.path / "bt").glob("env*-*"):
         env, step = f.name.rsplit("-", 1)

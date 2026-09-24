@@ -45,3 +45,47 @@ def report_log(pytester, *args, timeout=120):
                   for e in map(json.loads, open(path))
                   if e.get("$report_type") == "TestReport")
     return result, rows
+
+
+#: For test bodies: ``with stamped(request):`` records when the body ran (and in which
+#: process) in the directory $LANES_STAMPS. Asserting overlap instead of wall-clock
+#: duration keeps the timing tests stable under load (backlog item 2).
+STAMPED = '''
+import contextlib as _cl, os as _os, time as _time
+@_cl.contextmanager
+def stamped(request):
+    start = _time.monotonic()
+    try:
+        yield
+    finally:
+        name = request.node.nodeid.replace("/", "_").replace(":", "_")
+        with open(_os.path.join(_os.environ["LANES_STAMPS"], name), "w") as f:
+            f.write(f"{start} {_time.monotonic()} {_os.getpid()}")
+'''
+
+
+def stamps_dir(pytester, monkeypatch):
+    """Where stamps go; also writes ``stamping.py`` (``from stamping import stamped``)."""
+    d = pytester.path / "stamps"
+    d.mkdir()
+    (pytester.path / "stamping.py").write_text(STAMPED)
+    monkeypatch.setenv("LANES_STAMPS", str(d))
+    return d
+
+
+def max_overlap(stamps, pid=None) -> int:
+    """The largest number of stamped test bodies running at one moment (in one process)."""
+    events = []
+    for f in stamps.iterdir():
+        start, end, owner = f.read_text().split()
+        if pid is None or int(owner) == pid:
+            events += [(float(start), 1), (float(end), -1)]
+    running = best = 0
+    for _, delta in sorted(events, key=lambda e: (e[0], e[1])):   # an end before a start at a tie
+        running += delta
+        best = max(best, running)
+    return best
+
+
+def stamp_pids(stamps) -> set:
+    return {int(f.read_text().split()[2]) for f in stamps.iterdir()}

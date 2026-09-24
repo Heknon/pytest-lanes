@@ -69,7 +69,7 @@ Tests in one scope run sequentially, in order, on one lane; different scopes run
 | `@pytest.mark.lanes_exclusive` | Run this test alone within its process. Doctests always are, since doctest swaps `sys.stdout` for the whole process |
 | ini `lanes_exclusive_fixtures` | Fixtures that make a test exclusive. Default: capsys, capsysbinary, capfd, capfdbinary, capteesys, recwarn. Requesting one at run time (`request.getfixturevalue`) from a test that is not exclusive fails that test with instructions |
 | `-s` / `--capture=no` | As under xdist: test output goes straight to the terminal. Log records are still captured per test |
-| `--lanes-allow-patches`, ini `lanes_allow_patches`, `@pytest.mark.lanes_allow_patches` | Turn off the patch guard for the run, or for one test. The guard fails a test that is not `lanes_exclusive` when it patches process-wide state through `mock.patch`/pytest-mock/`monkeypatch` (a module or class attribute, a dotted path, the environment, `chdir`, `sys.path`); patches of instances are allowed. Set values the whole run needs in `pytest_configure`, not in a session-scoped fixture: each lane tears its own fixture down when it finishes |
+| `--lanes-allow-patches`, ini `lanes_allow_patches`, `@pytest.mark.lanes_allow_patches` | Turn off the patch guard for the run, or for one test. The guard fails a test that is not `lanes_exclusive` when it patches process-wide state through `mock.patch`/pytest-mock/`monkeypatch` (a module or class attribute, a dotted path, the environment, `chdir`, `sys.path`); patches of instances are allowed. Direct environment writes (`os.environ[k] = v`) and `os.chdir` are guarded too: besides being seen by every lane, an environment write while another lane starts a subprocess makes that spawn fail. Set values the whole run needs in `pytest_configure`, not in a session-scoped fixture: each lane tears its own fixture down when it finishes |
 | ini `lanes_interrupt_grace` | Seconds to wait after Ctrl-C for the interrupted lanes to run their teardown (default 30). A second Ctrl-C stops waiting |
 | `--lanes-xdist-node-hooks` + ini `lanes_node_hook_plugins` | Single-process mode: fire xdist's `pytest_testnodeready` / `testnodedown` for each lane, but only to the named plugins (default `conftest`) |
 
@@ -82,6 +82,7 @@ Lanes are threads, so anything process-global is shared between concurrently run
 - `contextlib.redirect_stdout`/`redirect_stderr` redirect only the lane that entered them.
 - Replacing `sys.stdout` directly, as click's `CliRunner` does, cannot be made per lane: the run fails and names the tests. Mark them `lanes_exclusive`.
 - A test reading stdin fails at once, as under pytest's capture.
+- `PYTEST_CURRENT_TEST` is per lane: `os.environ["PYTEST_CURRENT_TEST"]` names the test running on that lane. It is not written to the process environment (that broke other lanes' subprocess spawns), so a subprocess sees it only if you pass `env=os.environ.copy()`.
 - Ctrl-C interrupts the running tests and runs their teardown (see `lanes_interrupt_grace`).
 
 Other limits:
@@ -101,7 +102,7 @@ Before running a suite on lanes, find the tests that change process-wide state:
 pytest --lanes-detect --lanes-detect-report=shared-state.json   # sequential; no --lanes, no -n
 ```
 
-Tests run one at a time, as in plain pytest. Around each test the detector snapshots process state (environment variables, cwd, `sys.path`, logging levels, signal handlers) and, recursively, everything reachable from your modules' globals, their classes' attributes, and every registered plugin object (including plugins held inside other plugins). It also records every `mock.patch`/`patch.dict`/pytest-mock patch, `monkeypatch` call, `os.environ` write and `os.chdir` made inside a test body. The report sorts each changed path:
+Tests run one at a time, as in plain pytest. Around each test the detector snapshots process state (environment variables, cwd, `sys.path`, logging levels, signal handlers) and, recursively, everything reachable from your modules' globals, their classes' attributes, and every registered plugin object (including plugins held inside other plugins). It also records every `mock.patch`/`patch.dict`/pytest-mock patch, `monkeypatch` call, `os.environ` write and `os.chdir` made inside a test body. A session, module or class fixture's changes are reported under the fixture's name, not the test that ran it. A value set and restored inside one test body (for example by a context manager) is not seen, unless it goes through mock or monkeypatch. The report sorts each changed path:
 
 | Kind | Meaning | Action |
 |---|---|---|

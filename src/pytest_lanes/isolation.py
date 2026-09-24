@@ -7,7 +7,8 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 
 * P1 ``session._setupstate``: one SetupState per lane.
 * P2 ``FixtureDef.cached_result`` / ``_finalizers`` / ``cached_param``: fixture caches per lane.
-* P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
+* P6 ``_pytest.runner._update_current_test_var`` and ``os.environ``'s class:
+  ``PYTEST_CURRENT_TEST`` per lane, never written to the process environment.
 * P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
 * P10 ``config.workerinput`` / ``workeroutput``: each lane is its own xdist worker.
 * P11 ``_pytest.recwarn.WarningsRecorder.__enter__``: fail closed on pytest.warns
@@ -154,27 +155,96 @@ class _PerLaneAttribute:
 
 
 # ------------------------------------------------------------ P6: PYTEST_CURRENT_TEST
+CURRENT_TEST_VAR = "PYTEST_CURRENT_TEST"
+
+
+def current_test_value(item, when) -> str:
+    """pytest's value for PYTEST_CURRENT_TEST (checked against pytest by the P6 probe)."""
+    return f"{item.nodeid} ({when})".replace("\x00", "(null)")
+
+
+def _lane_environ_class(base):
+    """``os.environ``'s class, with ``PYTEST_CURRENT_TEST`` read and written per lane.
+
+    Off a lane, and for every other key, it is ``base`` unchanged.
+    """
+    def lane_or_none(key):
+        return LANE.get() if key == CURRENT_TEST_VAR else None
+
+    class LaneEnviron(base):
+        def __getitem__(self, key):
+            lane = lane_or_none(key)
+            if lane is None:
+                return super().__getitem__(key)
+            if lane.current_test_var is None:
+                raise KeyError(key)
+            return lane.current_test_var
+
+        def __setitem__(self, key, value):
+            lane = lane_or_none(key)
+            if lane is None:
+                return super().__setitem__(key, value)
+            if not isinstance(value, str):
+                raise TypeError(f"str expected, not {type(value).__name__}")
+            lane.current_test_var = value
+
+        def __delitem__(self, key):
+            lane = lane_or_none(key)
+            if lane is None:
+                return super().__delitem__(key)
+            if lane.current_test_var is None:
+                raise KeyError(key)
+            lane.current_test_var = None
+
+        def __iter__(self):
+            lane = LANE.get()
+            if lane is None:
+                yield from super().__iter__()
+                return
+            for key in list(super().__iter__()):
+                if key != CURRENT_TEST_VAR:
+                    yield key
+            if lane.current_test_var is not None:
+                yield CURRENT_TEST_VAR
+
+        def __len__(self):
+            return sum(1 for _ in self)
+
+    LaneEnviron.__name__ = LaneEnviron.__qualname__ = base.__name__
+    return LaneEnviron
+
+
 @contextlib.contextmanager
-def race_free_current_test_var():
-    """pytest pops PYTEST_CURRENT_TEST without a default, so two lanes finishing
-    together raised KeyError in teardown (seen 3 in 1,000 under load)."""
+def per_lane_current_test_var():
+    """``PYTEST_CURRENT_TEST`` per lane, kept out of the process environment.
+
+    pytest sets and deletes it in ``os.environ`` at every phase: with many lanes the
+    process environment was rewritten constantly. A child started meanwhile with the
+    parent's environment (``subprocess`` without ``env=``) read it while it changed:
+    ``OSError: [Errno 14] Bad address`` (2 of 12 spawning tests beside 3,000 short
+    ones), or a torn environment. The shared value also named another lane's test
+    (F17), and ``pop`` without a default raised KeyError when two lanes finished
+    together. Now each lane keeps its own value, and ``os.environ`` (an instance of a
+    subclass installed for the session) returns it on that lane. Children started
+    without ``env=`` do not inherit it; ``env=os.environ.copy()`` passes the lane's.
+    """
     from _pytest import runner
 
     original = runner._update_current_test_var
 
     def _update_current_test_var(item, when):
-        if when:
-            original(item, when)
-        else:
-            # Not os.environ.pop(k, None): MutableMapping.pop is check-then-delete, and
-            # another lane can delete in between (routinely on free-threaded 3.14t).
-            with contextlib.suppress(KeyError):
-                del os.environ["PYTEST_CURRENT_TEST"]
+        lane = LANE.get()
+        if lane is None:
+            return original(item, when)
+        lane.current_test_var = current_test_value(item, when) if when else None
 
+    base = type(os.environ)
     runner._update_current_test_var = _update_current_test_var
+    os.environ.__class__ = _lane_environ_class(base)
     try:
         yield
     finally:
+        os.environ.__class__ = base
         runner._update_current_test_var = original
 
 
@@ -396,6 +466,10 @@ PATCH_GUARD_MESSAGE = (
     "sees it until it is undone. Mark this test @pytest.mark.lanes_exclusive (it then runs "
     "alone), or, if nothing another test runs uses what it patches, "
     "@pytest.mark.lanes_allow_patches. --lanes-allow-patches turns this check off.")
+ENVIRON_NOTE = (
+    " An environment write also breaks subprocesses that other lanes start meanwhile: the "
+    "child reads the environment while it changes ('OSError: [Errno 14] Bad address', or a "
+    "torn environment).")
 PATCH_GUARD_SESSION_MESSAGE = (
     "pytest-lanes: {what} in a {scope}-scoped fixture patches process-wide state, and each "
     "lane has its own copy of that fixture: the first lane to finish tears it down and "
@@ -473,6 +547,10 @@ def _from_pytest(frame) -> bool:
 
 
 
+#: Audit events of direct process-wide writes that the patch guard checks (public API).
+AUDITED = frozenset({"os.putenv", "os.unsetenv", "os.chdir"})
+
+
 def _shared_mapping(mapping) -> bool:
     return mapping is os.environ or mapping is sys.modules or isinstance(mapping, str)
 
@@ -487,7 +565,14 @@ def guard_process_patches(config, is_exclusive):
     test's own), exclusive tests, ``lanes_allow_patches`` tests, and processes with one
     lane. Patches in session-scoped fixtures are guarded too: each lane tears its own
     fixture down when it finishes, undoing the patch for lanes still running (seen as a
-    KeyError). Direct assignments (``os.environ[k] = v``) cannot be seen: ``--lanes-detect``.
+    KeyError).
+
+    Direct environment writes (``os.environ[k] = v``, ``del``, ``os.putenv``) and
+    ``os.chdir`` are seen through their public audit events. An environment write
+    also breaks subprocesses other lanes start meanwhile: the child reads the process
+    environment while it changes ("OSError: [Errno 14] Bad address"). Other direct
+    assignments (``module.attr = x``) cannot be seen: ``--lanes-detect``. Python cannot
+    remove an audit hook, so it is switched off when the session ends.
     """
     if config.getoption("lanes_allow_patches") or config.getini("lanes_allow_patches") \
             or (config.getoption("lanes") or 0) <= 1:
@@ -496,7 +581,7 @@ def guard_process_patches(config, is_exclusive):
 
     from unittest import mock
 
-    def check(what: str, frame) -> None:
+    def check(what: str, frame, note: str = "") -> None:
         lane = LANE.get()
         if lane is None or _from_pytest(frame):
             return
@@ -510,10 +595,10 @@ def guard_process_patches(config, is_exclusive):
         # (hybrid mode runs exclusive tests between others).
         scope = lane.fixture_scopes[-1] if lane.fixture_scopes else "function"
         if scope in ("session", "package", "module", "class"):
-            pytest.fail(PATCH_GUARD_SESSION_MESSAGE.format(what=what, scope=scope), pytrace=False)
+            pytest.fail(PATCH_GUARD_SESSION_MESSAGE.format(what=what, scope=scope) + note, pytrace=False)
         if is_exclusive(item):
             return
-        pytest.fail(PATCH_GUARD_MESSAGE.format(what=what), pytrace=False)
+        pytest.fail(PATCH_GUARD_MESSAGE.format(what=what) + note, pytrace=False)
 
     notset = object()
     originals = []
@@ -582,9 +667,26 @@ def guard_process_patches(config, is_exclusive):
     install(mp, "delenv", mp_always("monkeypatch.delenv"))
     install(mp, "chdir", mp_always("monkeypatch.chdir"))
     install(mp, "syspath_prepend", mp_always("monkeypatch.syspath_prepend"))
+
+    active = [True]
+
+    def audit(event, args):
+        if not active[0] or event not in AUDITED or LANE.get() is None:
+            return
+        frame = sys._getframe(1)
+        while frame is not None and frame.f_globals.get("__name__") == "os":
+            frame = frame.f_back                        # os.environ's own methods
+        if event == "os.chdir":
+            check("os.chdir", frame)
+            return
+        key = args[0].decode(errors="replace") if isinstance(args[0], bytes) else args[0]
+        check(f"a write to os.environ[{key!r}]", frame, ENVIRON_NOTE)
+
+    sys.addaudithook(audit)
     try:
         yield
     finally:
+        active[0] = False
         for owner, name, original in reversed(originals):
             setattr(owner, name, original)
 
@@ -628,7 +730,7 @@ def isolate_lanes(config, session, is_exclusive):
     """Install every per-lane isolation; yields a ``LaneStateFactory``."""
     patch_fixturedef()                                                   # P2
     with contextlib.ExitStack() as stack:
-        stack.enter_context(race_free_current_test_var())                # P6
+        stack.enter_context(per_lane_current_test_var())                  # P6
         stack.enter_context(per_lane_worker_identity(config))            # P10
         stack.enter_context(guard_warnings_recorder(is_exclusive))       # P11
         stack.enter_context(guard_process_patches(config, is_exclusive))  # P14

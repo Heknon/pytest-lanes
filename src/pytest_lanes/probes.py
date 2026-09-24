@@ -155,10 +155,36 @@ def _p4_hookexec(config):
 
 
 def _p6_current_test_var(config):
+    import os
+    from types import SimpleNamespace
+
     from _pytest import runner
 
-    if not callable(getattr(runner, "_update_current_test_var", None)):
+    from .isolation import CURRENT_TEST_VAR, _lane_environ_class, current_test_value
+
+    update = getattr(runner, "_update_current_test_var", None)
+    if not callable(update):
         return "P6 _pytest.runner._update_current_test_var"
+    base = type(os.environ)
+    try:
+        os.environ.__class__ = _lane_environ_class(base)
+        os.environ.__class__ = base
+    except TypeError as e:
+        return f"P6 os.environ's class can no longer be replaced ({e})"
+    # Lanes compute the value themselves: it must be what pytest would set.
+    item = SimpleNamespace(nodeid="probe.py::test[\x00]")
+    saved = os.environ.get(CURRENT_TEST_VAR)
+    try:
+        update(item, "call")
+        got = os.environ.get(CURRENT_TEST_VAR)
+        update(item, None)
+    except Exception as e:
+        return f"P6 _pytest.runner._update_current_test_var ({type(e).__name__}: {e})"
+    finally:
+        if saved is not None:
+            os.environ[CURRENT_TEST_VAR] = saved
+    if got != current_test_value(item, "call"):
+        return f"P6 PYTEST_CURRENT_TEST format changed ({got!r})"
     return None
 
 
