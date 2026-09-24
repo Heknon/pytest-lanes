@@ -9,7 +9,7 @@ import re
 import sys
 
 import pytest
-from lanes_testing import BASE, MODES, report_log, run
+from lanes_testing import BASE, CONTEXT_AWARE_WARNINGS, MODES, report_log, run
 
 #: BASE with the cache provider on (it is off everywhere else). BASE is "-p X" pairs.
 WITH_CACHE = [arg for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:cacheprovider")
@@ -587,3 +587,31 @@ def test_utf8_split_across_buffer_writes(pytester):
     call = [e for e in map(json.loads, open(pytester.path / "rl.jsonl"))
             if e.get("$report_type") == "TestReport" and e["when"] == "call"][0]
     assert ["h\u00e9llo \u2713\n"] == [t for n, t in call["sections"] if "stdout" in n], call["sections"]
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "1", "--lanes", "3"]], ids=["lanes", "hybrid"])
+def test_warning_shown_on_one_lane_is_not_hidden_from_another(pytester, monkeypatch, mode):
+    # Python remembers a warning shown with the "default" action in the emitting module's
+    # __warningregistry__, and skips the filters on a repeat. Shared by lanes, one lane's
+    # "default" warning hid it from another lane whose filter is "error": the error tests
+    # passed (cycle-6 review). On 3.14 each lane's warning context now ends with "always",
+    # so an unmatched warning is never registered.
+    if not CONTEXT_AWARE_WARNINGS:
+        pytest.skip("context-aware warnings need Python 3.14 (before it, warnings run with -p no:warnings)")
+    monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "1")
+    pytester.makepyfile(helper="import warnings\ndef old():\n    warnings.warn('old api', UserWarning)\n")
+    pytester.makepyfile(test_e="""
+        import time, pytest, helper
+        @pytest.mark.parametrize("i", range(4))
+        def test_user(i):
+            for _ in range(100):
+                helper.old(); time.sleep(0.002)
+        @pytest.mark.parametrize("i", range(4))
+        @pytest.mark.filterwarnings("error::UserWarning")
+        def test_must_fail(i):
+            time.sleep(0.05)
+            helper.old()
+    """)
+    base = [a for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:warnings") for a in pair]
+    r = pytester.runpytest_subprocess(*base, *mode, timeout=120)
+    r.assert_outcomes(passed=4, failed=4, warnings=r.parseoutcomes().get("warnings", 0))

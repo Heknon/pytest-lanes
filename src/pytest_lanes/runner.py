@@ -35,7 +35,7 @@ import pytest
 from .capture import capture_phase
 from .hookrouting import ControllerHookRouter, HookCall
 from .integrity import Ledger, StdioWatch
-from .isolation import isolate_lanes
+from .isolation import isolate_lanes, show_unmatched_warnings_always
 from .lane import LANE, SHUTDOWN, ThreadNode
 
 
@@ -97,14 +97,17 @@ class LaneRunner:
     # ---- per-phase capture (same nesting as CaptureManager) -------------------
     @pytest.hookimpl(wrapper=True, trylast=True)
     def pytest_runtest_setup(self, item):
+        show_unmatched_warnings_always()
         return (yield from capture_phase(item, "setup"))
 
     @pytest.hookimpl(wrapper=True, trylast=True)
     def pytest_runtest_call(self, item):
+        show_unmatched_warnings_always()
         return (yield from capture_phase(item, "call"))
 
     @pytest.hookimpl(wrapper=True, trylast=True)
     def pytest_runtest_teardown(self, item):
+        show_unmatched_warnings_always()
         return (yield from capture_phase(item, "teardown"))
 
     # ---- lanes ------------------------------------------------------------------

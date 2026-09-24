@@ -180,3 +180,68 @@ def test_group_suffix_follows_dist_as_in_xdist(pytester, name):
     lanes = report_log(pytester, *dist_args(MODES[name], "loadgroup"))[1]
     assert lanes == xdist
     assert all(row[0].endswith("@g1") for row in xdist), xdist
+
+
+# ---------------------------------------------------------------- cycle-6 review (rerunfailures)
+RERUN_ENV_CONFTEST = """
+import json, os, threading, pytest
+LOG = os.path.join(os.path.dirname(__file__), "ev.log")
+L = threading.Lock()
+@pytest.fixture(scope="module")
+def env(request, worker_id):
+    name = request.module.__name__
+    with L, open(LOG, "a") as f: f.write(json.dumps(["setup", name, worker_id]) + "\\n")
+    yield name
+    with L, open(LOG, "a") as f: f.write(json.dumps(["teardown", name, worker_id]) + "\\n")
+"""
+
+
+@pytest.mark.parametrize("name", ["lanes", "hybrid"])
+def test_rerun_does_not_tear_down_another_lanes_module_fixture(pytester, name):
+    # pytest-rerunfailures (>= 16) moves the setup stack above a test it will rerun into
+    # one module-level dict, and every test's teardown moves that dict into its own
+    # SetupState: another lane's test took the rerunning lane's entries, so a module's
+    # environment was torn down under running tests, or never (run still green).
+    rf = pytest.importorskip("pytest_rerunfailures")
+    if not hasattr(rf, "suspended_finalizers"):
+        pytest.skip("this pytest-rerunfailures has no suspended_finalizers")
+    pytester.makeconftest(RERUN_ENV_CONFTEST)
+    pytester.makepyfile(test_flaky="""
+        import time
+        def test_f1(env, request):
+            time.sleep(0.2)
+            assert request.node.execution_count >= 2
+        def test_f2(env): time.sleep(0.3)
+    """)
+    for mod, n in (("test_ok_a", 10), ("test_ok_b", 20), ("test_ok_c", 40)):
+        pytester.makepyfile(**{mod: f"""
+            import time, pytest
+            @pytest.mark.parametrize("i", range({n}))
+            def test_ok(env, i): time.sleep(0.1)
+        """})
+    r = run(pytester, *dist_args(MODES[name], "loadscope"), "--reruns", "1", "--reruns-delay", "1", timeout=120)
+    outcomes = r.parseoutcomes()
+    assert (outcomes.get("passed"), outcomes.get("rerun")) == (72, 1), r.stdout.str()[-2000:]
+    import collections
+    import json
+    events = [json.loads(line) for line in open(pytester.path / "ev.log")]
+    count = collections.Counter((kind, mod, wid) for kind, mod, wid in events)
+    for (kind, mod, wid), n in count.items():
+        assert n == 1 and count[("teardown" if kind == "setup" else "setup", mod, wid)] == 1, (events, count)
+
+
+def test_rerun_suite_counter_is_serialized_across_lanes(pytester):
+    # Two of the five socket methods of rerunfailures' per-worker client were left
+    # unserialized: concurrent lanes interleaved on its socket (INTERNALERROR).
+    rf = pytest.importorskip("pytest_rerunfailures")
+    if not hasattr(getattr(rf, "ClientStatusDB", None), "try_increment_suite_reruns"):
+        pytest.skip("this pytest-rerunfailures has no suite rerun counter")
+    pytester.makepyfile("""
+        import pytest
+        @pytest.mark.parametrize("i", range(200))
+        def test_x(i, request):
+            assert request.node.execution_count >= 2
+    """)
+    r = run(pytester, "-n", "2", "--lanes", "8", "--reruns", "1", "--max-suite-reruns", "1000", timeout=180)
+    outcomes = r.parseoutcomes()
+    assert (outcomes.get("passed"), outcomes.get("rerun")) == (200, 200), r.stdout.str()[-2000:]

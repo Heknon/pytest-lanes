@@ -60,11 +60,24 @@ def _p9_doctest_item(config):
 
 
 def _c1_rerunfailures_client(config):
-    from .compat import RERUN_DB_METHODS, rerunfailures_client
+    from .compat import rerunfailures_client
 
     db = rerunfailures_client(config)
-    if db is not None and not (hasattr(db, "sock") and hasattr(db, "_get") and hasattr(db, "_set")):
-        return f"C1 pytest-rerunfailures ClientStatusDB no longer has sock/{'/'.join(RERUN_DB_METHODS)}"
+    if db is not None and not (hasattr(db, "sock") and callable(getattr(db, "_sock_send", None))):
+        return "C1 pytest-rerunfailures ClientStatusDB no longer talks on .sock/_sock_send"
+    return None
+
+
+def _c2_rerunfailures_suspended_finalizers(config):
+    from .compat import rerunfailures_module
+
+    rf = rerunfailures_module()
+    if rf is None or not hasattr(rf, "suspended_finalizers"):
+        return None
+    restore = getattr(rf, "_restore_suspended_finalizers", None)
+    if not isinstance(rf.suspended_finalizers, dict) or restore is None \
+            or "suspended_finalizers" not in restore.__code__.co_names:
+        return "C2 pytest-rerunfailures suspended_finalizers (module-level dict read by name)"
     return None
 
 
@@ -225,7 +238,7 @@ CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_
           _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect, _p14_patch_guard, _p15_capture_suspend,
           _x2_worker_interactor,
           _x1_xdist_scheduler_api,
-          _c1_rerunfailures_client,
+          _c1_rerunfailures_client, _c2_rerunfailures_suspended_finalizers,
           _pytest_timeout, _faulthandler_timeout)
 
 

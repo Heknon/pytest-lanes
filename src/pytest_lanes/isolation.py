@@ -40,7 +40,7 @@ from .capture import (
     per_lane_std_streams,
     snapshot_logger_dict,
 )
-from .compat import serialized_rerunfailures_client
+from .compat import per_lane_rerun_suspended_finalizers, serialized_rerunfailures_client
 from .lane import LANE
 
 
@@ -202,7 +202,11 @@ class _TempPathFactoryRouter:
             return self._main
         if lane.tmp_path_factory is None:
             lane.tmp_path_factory = _lane_factory(self._main, lane.gateway.id, self._in_worker)
+            self._created().append(lane.tmp_path_factory)
         return lane.tmp_path_factory
+
+    def _created(self) -> list:
+        return self.__dict__.setdefault("_lane_factories", [])
 
     def __getattr__(self, name):
         return getattr(self._target(), name)
@@ -255,6 +259,20 @@ def per_lane_basetemp(config):
         if legacy is not None:
             legacy._tmppath_factory = main
         main.__dict__.pop("getbasetemp", None)
+        _cleanup_lane_basetemps(router._created())
+
+
+def _cleanup_lane_basetemps(factories) -> None:
+    """pytest removes dangling ``<name>current`` links from its basetemp at the end of
+    the session (retention); lanes' basetemps get the same (after every test's teardown)."""
+    try:
+        from _pytest.pathlib import cleanup_dead_symlinks
+    except ImportError:  # pragma: no cover - older pytest keeps them too
+        return
+    for factory in factories:
+        base = getattr(factory, "_basetemp", None)
+        if base is not None and base.is_dir():
+            cleanup_dead_symlinks(base)
 
 
 # ------------------------------------------------------------ P10: worker identity
@@ -352,6 +370,26 @@ class LaneStateFactory:
         return clone_log_handlers(self.log_templates)
 
 
+# ------------------------------------------------------------------ warnings registry (3.14)
+def show_unmatched_warnings_always() -> None:
+    """On a lane, with context-aware warnings: end this test's filters with "always".
+
+    Python records a warning shown with the "default" (or "module"/"once") action in the
+    emitting module's ``__warningregistry__`` and, on a repeat, returns before consulting
+    any filter. The registry is shared by lanes, so a warning one lane showed was hidden
+    from another lane whose filter says "error": its test passed. With "always" last, a
+    warning no filter matches is shown and never registered; filters the user or pytest
+    set still come first. The cost: repeats within a test are all recorded (the warnings
+    summary may count more than xdist's). Called at the start of each phase, inside
+    pytest's per-test ``catch_warnings``, so it ends with the test.
+    """
+    if LANE.get() is None or not getattr(sys.flags, "context_aware_warnings", False):
+        return
+    import warnings
+
+    warnings.filterwarnings("always", append=True)
+
+
 # ------------------------------------------------------------------ P14: process-wide patches
 PATCH_GUARD_MESSAGE = (
     "pytest-lanes: {what} patches process-wide state: every test running on another lane "
@@ -386,12 +424,12 @@ def check_p14():
 
 
 def _shared(target) -> bool:
-    """A module or a class is shared by every lane; an instance, or a class defined
-    inside a function (``<locals>``) that no module holds, is presumed the test's own."""
+    """A module, a class or an instance that a module holds is shared by every lane;
+    anything else (made in the test) is presumed the test's own."""
     if isinstance(target, types.ModuleType):
         return True
     if not isinstance(target, type):
-        return False
+        return _held_by_a_module(target)
     # Shared when its module holds it: by its qualified name (nested classes too), or
     # under any name (a factory's class assigned to a global). A class made in a test,
     # by a class statement or by type(), is not reachable that way.
@@ -404,6 +442,18 @@ def _shared(target) -> bool:
         if obj is None:
             break
     return obj is target or any(v is target for v in list(vars(module).values()))
+
+
+def _held_by_a_module(obj) -> bool:
+    """An instance a module global refers to (a settings or client singleton) is shared."""
+    for module in list(sys.modules.values()):
+        try:
+            values = list(vars(module).values())
+        except TypeError:
+            continue
+        if any(v is obj for v in values):
+            return True
+    return False
 
 
 def _patch_by_path(patcher) -> bool:
@@ -588,6 +638,7 @@ def isolate_lanes(config, session, is_exclusive):
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
         stack.enter_context(snapshot_logger_dict())                       # P8
         stack.enter_context(serialized_rerunfailures_client(config))      # C1
+        stack.enter_context(per_lane_rerun_suspended_finalizers())        # C2
         stack.enter_context(serialized_cache())                           # P12
         if config.getoption("capture") != "no":                          # -s: no capture, as xdist
             stack.enter_context(per_lane_std_streams())

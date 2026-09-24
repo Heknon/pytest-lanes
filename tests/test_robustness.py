@@ -657,3 +657,29 @@ def test_subclass_of_an_unsupported_scheduler_is_refused_up_front(pytester):
     pytester.makepyfile("def test_t(): pass\n")
     r = run(pytester, "--lanes", "2", timeout=60)
     assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str() + r.stderr.str()
+
+
+def test_collect_only_with_a_collection_error_exits_interrupted(pytester):
+    # xdist and plain pytest end "Interrupted: 1 error during collection" (exit 2);
+    # single-process lanes returned early and exited 1 (cycle-6 review).
+    pytester.makepyfile(test_ok="def test_t(): pass\n", test_bad="import nonexistent_module_xyz\n")
+    r = run(pytester, "--lanes", "3", "--co", timeout=60)
+    assert r.ret == pytest.ExitCode.INTERRUPTED, r.stdout.str()
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "2", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_no_dead_symlinks_left_in_lane_basetemps(pytester, mode):
+    # pytest removes dangling "<name>current" links from its basetemp when retention drops
+    # directories; lanes' own basetemps kept them (cycle-6 review).
+    pytester.makeini("[pytest]\ntmp_path_retention_policy = failed\n")
+    pytester.makepyfile("""
+        import pytest, time
+        @pytest.mark.parametrize("i", range(6))
+        def test_t(tmp_path, i):
+            (tmp_path / "f").write_text("x"); time.sleep(0.05)
+            assert i != 5
+    """)
+    bt = pytester.path / "bt"
+    run(pytester, *mode, f"--basetemp={bt}", timeout=60)
+    dead = [p for p in bt.rglob("*") if p.is_symlink() and not p.exists()]
+    assert dead == [], dead

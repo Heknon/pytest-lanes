@@ -48,7 +48,7 @@ class SingleProcessSession(LaneRunner):
         # the other tests run and the run fails (exit 1). With -x, the collection
         # error already set session.shouldfail, so the lanes stop at once.
         if session.config.option.collectonly:
-            return True
+            return None      # pytest's own loop: it reports collection errors (Interrupted)
 
         parallel = [it for it in session.items if not self.is_exclusive(it)]
         serial = [it for it in session.items if self.is_exclusive(it)]

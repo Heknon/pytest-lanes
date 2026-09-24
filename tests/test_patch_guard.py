@@ -332,3 +332,16 @@ def test_nested_module_class_is_shared(pytester):
     """)
     r = run(pytester, "--lanes", "2", timeout=60)
     r.stdout.fnmatch_lines([GUARD_MESSAGE])
+
+
+def test_module_level_instance_is_shared(pytester):
+    # A settings singleton held by a module is shared by every lane, like a class; the
+    # guard let monkeypatch.setattr(settings_mod.settings, ...) through (cycle-6 review).
+    pytester.makepyfile(settings_mod="class _S:\n    DEBUG = False\nsettings = _S()\n")
+    pytester.makepyfile("""
+        import settings_mod
+        def test_patcher(monkeypatch):
+            monkeypatch.setattr(settings_mod.settings, "DEBUG", True)
+    """)
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.stdout.fnmatch_lines([GUARD_MESSAGE])
