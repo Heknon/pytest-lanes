@@ -84,6 +84,31 @@ Lanes are threads, so anything process-global is shared between concurrently run
 
 The full list, with workarounds, is in [DESIGN.md → Flags](DESIGN.md#flags-no-complete-fix).
 
+### Finding shared state: `--lanes-detect`
+
+Before running a suite on lanes, find the tests that change process-wide state:
+
+```bash
+pytest --lanes-detect --lanes-detect-report=shared-state.json   # sequential; no --lanes, no -n
+```
+
+Tests run one at a time, as in plain pytest. Around each test the detector snapshots process state (environment variables, cwd, `sys.path`, logging levels, signal handlers) and, recursively, everything reachable from your modules' globals, their classes' attributes, and every registered plugin object (including plugins held inside other plugins). It also records every `mock.patch`/`patch.dict`/pytest-mock patch, `monkeypatch` call, `os.environ` write and `os.chdir` made inside a test body. The report sorts each changed path:
+
+| Kind | Meaning | Action |
+|---|---|---|
+| `UNSAFE per-test` | Changes while tests run: a "current test" field, a global set by a fixture | Make it per lane (a contextvar), or mark the tests `lanes_exclusive` |
+| `UNSAFE patched` | Patched inside a test | Mark the test `lanes_exclusive` |
+| `CHECK grows` | A container that grows with every test | Check it is thread-safe |
+| `OK set-once` | Set once, then stable: a cache, lazy initialisation | Nothing, if it is safe to share between threads |
+
+| ini | Meaning |
+|---|---|
+| `lanes_detect_ignore` | Paths shared on purpose (fnmatch patterns, one per line), e.g. `module:myinfra.clients._CACHE` |
+| `lanes_detect_modules` | Installed packages to inspect as well (by default: modules under the rootdir) |
+| `lanes_detect_max_depth`, `lanes_detect_max_nodes` | Walk limits (12 levels, 200,000 values per snapshot) |
+
+The walk is read-only: it never evaluates properties or `__getattr__`, and keeps no string values (only their length and hash).
+
 ## How it works
 
 ### The idea
@@ -145,6 +170,8 @@ src/pytest_lanes/
   hookrouting.py   the 4 controller hooks, replayed on the main thread   (P4)
   compat.py        shims for third-party plugins (pytest-rerunfailures)  (C1)
   integrity.py     run-time check: reports match what lanes ran, else INTERNALERROR
+  detector/        --lanes-detect, a separate debugging tool: walk, sources, recorder (D1),
+                   classify, report, plugin
   probes.py        fail-closed startup checks
 tests/test_contract.py   the spec: pytester subprocess tests, incl. parity against plain -n
 scripts/matrix.sh        contract suite across Python x pytest/xdist versions (uv)

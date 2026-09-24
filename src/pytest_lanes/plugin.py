@@ -20,6 +20,7 @@ Module map:
     hookrouting.py   the 4 controller hooks replayed on the main thread (P4)
     compat.py        shims for third-party plugins that assume one test per process (C1)
     integrity.py     run-time check that reports match what the lanes ran
+    detector/        --lanes-detect: which tests change process-wide state (debugging tool)
     probes.py        fail-closed startup checks of every internal we touch
 
 This module must stay free of logic: pytest registers it as a plugin, so any
@@ -30,6 +31,7 @@ from __future__ import annotations
 import pytest
 
 from .controller import LanesController
+from .detector import SharedStateDetector, refuse_concurrent
 from .probes import check_controller_touchpoints, check_touchpoints
 from .scheduling import SUPPORTED_DIST
 from .single import SingleProcessSession
@@ -53,6 +55,21 @@ def pytest_addoption(parser):
     parser.addini("lanes_exclusive_fixtures", "fixtures forcing a test into the serial phase",
                   type="args", default=list(DEFAULT_EXCLUSIVE))
 
+    g.addoption("--lanes-detect", action="store_true", default=False,
+                help="run tests one at a time and report which ones change process-wide state "
+                     "that concurrent lanes would share")
+    g.addoption("--lanes-detect-report", default=None, metavar="PATH",
+                help="also write the --lanes-detect report as JSON to PATH")
+    parser.addini("lanes_detect_ignore", "--lanes-detect: paths (fnmatch patterns) that are "
+                  "shared on purpose, e.g. module:myinfra.clients._CACHE", type="linelist", default=[])
+    parser.addini("lanes_detect_modules", "--lanes-detect: extra packages to inspect besides "
+                  "the modules under the rootdir, e.g. an installed infrastructure package",
+                  type="args", default=[])
+    parser.addini("lanes_detect_max_depth", "--lanes-detect: how deep to follow attributes",
+                  default="12")
+    parser.addini("lanes_detect_max_nodes", "--lanes-detect: most values per snapshot",
+                  default="200000")
+
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_load_initial_conftests(early_config, parser, args):
@@ -66,6 +83,10 @@ def pytest_load_initial_conftests(early_config, parser, args):
 def pytest_configure(config):
     config.addinivalue_line("markers", "lanes_exclusive: run in the serial phase, alone")
     lanes = config.getoption("lanes")
+    if config.getoption("lanes_detect"):
+        refuse_concurrent(config)
+        config.pluginmanager.register(SharedStateDetector(config), "lanes-detector")
+        return
     if lanes is not None and lanes < 0:
         raise pytest.UsageError(f"--lanes must be 0 (off) or a positive number of lanes, not {lanes}")
     if not lanes:

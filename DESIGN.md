@@ -64,6 +64,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
 | X4 | `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Hybrid mode only; mirrored on each `LaneProxy` so custom schedulers see worker-shaped nodes |
+| D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
 
 ## Verified
 
@@ -120,7 +121,19 @@ A race that crashes is found. The dangerous kind would leave a run green while a
    - **xdist hides worker INTERNALERRORs:** its controller prints one and the run can still exit 0 (xdist 3.8.0, plain `-n`: "3 passed", exit 0). The hybrid controller (`LanesController`) sets the exit status to INTERNALERROR whenever a worker reports one, so a failed check in a hybrid worker cannot look green.
 2. **A canary suite under maximum switching pressure (`tests/test_integrity.py`).** 200 tests on 48 lanes (or 2 × 24), with `sys.setswitchinterval(1e-6)`. Each test checks that its session, module, class and function fixtures, `worker_id`, `tmp_path` and caplog records are its own, and prints, logs and writes to stderr a token 30 times. Every section of every report must contain only its test's token, exactly 30 times, and the report-log rows must equal plain xdist's. Repeat it with `RUNS=N scripts/matrix.sh` to hunt rare races.
 
-Still out of reach of both: process-global state mutated by the tests themselves (F1), and output from threads a test spawns (F3).
+Still out of reach of both: process-global state mutated by the tests themselves (F1), and output from threads a test spawns (F3). For F1 there is a third tool, below.
+
+### Finding shared state before it bites: `--lanes-detect`
+
+The integrity check proves the plugin's own bookkeeping; it cannot see a test using another test's global. `--lanes-detect` finds that state ahead of time, in a sequential run (it refuses `--lanes` and `-n`, because concurrent tests would make every snapshot ambiguous).
+
+- **Snapshots.** Before setup (A), after the call phase with fixtures still active (B), and after teardown (C). They cover process state (environment, cwd, `sys.path`, logging levels, signal handlers) and a recursive walk from the globals of every module under the rootdir (plus `lanes_detect_modules`), the class attributes of classes they define, and every registered plugin object except pytest's, pluggy's, xdist's and lanes' own (lanes already isolate those). Objects are expanded when their type comes from one of those packages, so a plugin holding other plugins, lists, dicts or nested objects is followed. Each object is expanded once per snapshot, which bounds the walk and makes cycles safe.
+- **Read-only.** Attributes come from `__dict__` and `__slots__`, so no property, `__getattr__` or `__eq__` runs; containers are read through the base `dict`/`list` methods; strings are kept as length and hash only.
+- **Live recording** (touchpoint D1, plus public APIs): `mock.patch` and `patch.dict` (so pytest-mock too), `pytest.MonkeyPatch`, and the `os.putenv`/`os.unsetenv`/`os.chdir` audit events. These catch changes made and undone inside one test body.
+- **Classification.** Changed and restored within a test, or changed in two or more tests: `per-test` (unsafe). Patched in a test: `patched` (unsafe). A container growing in two or more tests: `grows` (check). Changed in exactly one test, then stable: `set-once` (a cache; fine if thread-safe). Paths inside an already reported path of the same or higher severity are left out.
+- **Checked on real code.** Run with pytest-failure-instrumentation active, it reported exactly the per-test state its lane-support design names: the recorder's counters and attempt, its state slot's nodeid and phase, the heartbeat identity, and the stall detector's `activity['main']`.
+
+Limits: state inside C extensions, objects deeper than `lanes_detect_max_depth`, objects of packages not inspected (they are compared by identity only), and external resources (ports, files, database rows), which collide under plain xdist too.
 
 ## Sizing: processes × lanes
 

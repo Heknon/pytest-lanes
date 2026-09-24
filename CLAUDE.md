@@ -54,6 +54,7 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 | `compat.py` | Shims for third-party plugins that assume one test at a time per process | C1 |
 | `integrity.py` | `Ledger`: the run-time integrity check. Each lane's routed hooks name the item it runs, replayed streams nest (logstart, reports, logfinish), each done item was logged, and (single process) every collected item ran as often as collected | |
 | `probes.py` | Fail-closed startup checks, one function per touchpoint | all except P1, P5 |
+| `detector/` | `--lanes-detect`, an isolated debugging tool, not used by lanes at run time: which tests change process-wide state. `walk.py` (read-only recursive snapshot), `sources.py` (process state, modules under the rootdir, plugin objects), `recorder.py` (live patch recording), `classify.py` (per-test / patched / grows / set-once), `report.py`, `plugin.py`. Only `SharedStateDetector` and `refuse_concurrent` are imported outside it | D1 |
 
 Mode selection in `pytest_configure`:
 - `config.workerinput` present: hybrid worker, `HybridWorkerSession`.
@@ -89,6 +90,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
 | X4 | hybrid controller: `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Mirrored on each `LaneProxy`, so a custom scheduler or plugin reading them sees a worker (`workerinput` gets the lane's id and the total lane count). Probed by checking the xdist code that sets them |
+| D1 | `--lanes-detect` only: stdlib `unittest.mock._patch.__enter__` (and `.getter`/`.attribute`), `_patch_dict._patch_dict` | Records patches applied inside a test body, which no snapshot sees. Probed by `detector.recorder.check_d1` (a UsageError for `--lanes-detect` if it fails); never installed in a lanes run |
 
 ## How to run
 
@@ -157,7 +159,7 @@ These are not bugs to "fix" by weakening the invariants.
 4. **Context propagation for child threads on Python 3.13 and earlier (F3).**
    - Opt-in `--lanes-propagate-context`: patch `threading.Thread.start` so the thread runs inside `contextvars.copy_context()` of the starter.
    - A test must show that stdout, logs and caplog records from a child thread are attributed to the right test.
-5. **Shared-state audit tool (F1).**
+5. **Shared-state audit tool (F1).** *Runtime part done: `--lanes-detect` (the `detector/` package, `tests/test_detector.py`). Checked on pytest-failure-instrumentation, where it found the per-test state that its lane-support design names. Static part still open:*
    - A `tools/audit_globals.py` AST scanner that reports `mock.patch`, `monkeypatch.setattr`/`setenv`/`chdir`, `os.environ[...] =`, `os.chdir`, `signal.signal`, `sys.path` mutation, `logging` level changes, and module-level mutable globals written from functions.
    - Output a CSV with file, line, pattern and a suggested action (`lanes_exclusive`, refactor, or safe).
    - Run it on the user's repo and hand over the report. Do not auto-edit the user's tests.
