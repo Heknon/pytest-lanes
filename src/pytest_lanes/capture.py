@@ -33,10 +33,13 @@ raise "dictionary changed size", so the dict's views are served from a copy.
 """
 from __future__ import annotations
 
+import codecs
 import contextlib
 import io
 import logging
 import sys
+import tempfile
+import threading
 
 from .lane import LANE
 
@@ -88,9 +91,15 @@ class _LaneStream(io.TextIOBase):
         redirected, target = self._redirect()
         if redirected and target is not None:
             return target.fileno()
-        if LANE.get() is None:
+        lane = LANE.get()
+        if lane is None:
             return self._real.fileno()
-        raise io.UnsupportedOperation("redirected stdout is pseudofile, has no fileno()")
+        # As under pytest's (default) fd capture: a file whose content becomes this
+        # test's captured output, so subprocess(stdout=sys.stdout) and faulthandler work.
+        f = lane.fd_files.get(self._attr)
+        if f is None:
+            f = lane.fd_files[self._attr] = tempfile.TemporaryFile(mode="w+b")
+        return f.fileno()
 
     def isatty(self):
         redirected, target = self._redirect()
@@ -189,7 +198,10 @@ class _LaneBinaryStream:
                 return target.buffer.write(b)
             target.write(bytes(b).decode(getattr(target, "encoding", None) or encoding, "replace"))
             return len(b)
-        getattr(lane, self._text._attr).write(bytes(b).decode(encoding, "replace"))
+        decoder = lane.decoders.get(self._text._attr)
+        if decoder is None:
+            decoder = lane.decoders[self._text._attr] = codecs.getincrementaldecoder(encoding)("replace")
+        getattr(lane, self._text._attr).write(decoder.decode(bytes(b)))
         return len(b)
 
     def flush(self):
@@ -450,16 +462,45 @@ def per_lane_logging(config):
     if lp.log_level is not None:  # pre-lower, so catching_logs() restoring the level is a no-op
         root.setLevel(min(root.level, lp.log_level))
     router = _LogRouter()
-    routed = [root] + [lg for lg in root.manager.loggerDict.values()
-                       if isinstance(lg, logging.Logger) and not lg.propagate]
-    for lg in routed:
-        lg.addHandler(router)
+    root.addHandler(router)
+    _ROUTING["router"] = router if PYTEST_CAPTURES_NONPROPAGATING else None
+    _ROUTING["routed"] = [root]
     try:
         yield templates
     finally:
         lp.caplog_handler, lp.report_handler = original
-        for lg in routed:
+        for lg in _ROUTING["routed"]:
             lg.removeHandler(router)
+        _ROUTING["router"] = None
+        _ROUTING["routed"] = []
+
+
+def _pytest_captures_nonpropagating() -> bool:
+    """pytest >= 9 attaches its handlers to the non-propagating loggers that exist when
+    each phase starts; earlier versions only to the root logger."""
+    try:
+        from _pytest.logging import catching_logs
+    except ImportError:  # pragma: no cover - the P3 probe fails first
+        return False
+    return "propagate" in catching_logs.__enter__.__code__.co_names
+
+
+PYTEST_CAPTURES_NONPROPAGATING = _pytest_captures_nonpropagating()
+_ROUTING: dict = {"router": None, "routed": []}
+_ROUTING_LOCK = threading.Lock()
+
+
+def _route_nonpropagating_loggers() -> None:
+    """At each phase start, as pytest >= 9's catching_logs: route the non-propagating
+    loggers that exist now (the router stays attached until the session ends)."""
+    router = _ROUTING["router"]
+    if router is None:
+        return
+    with _ROUTING_LOCK:
+        for lg in list(logging.Logger.manager.loggerDict.values()):
+            if isinstance(lg, logging.Logger) and not lg.propagate and router not in lg.handlers:
+                lg.addHandler(router)
+                _ROUTING["routed"].append(lg)
 
 
 def clone_log_handlers(templates: dict) -> dict:
@@ -481,8 +522,27 @@ def capture_phase(item, when):
     if lane is None:
         return (yield)
     lane.out, lane.err = io.StringIO(), io.StringIO()
+    _route_nonpropagating_loggers()
     try:
         return (yield)
     finally:
+        _collect_lane_output(lane)
         item.add_report_section(when, "stdout", lane.out.getvalue())
         item.add_report_section(when, "stderr", lane.err.getvalue())
+
+
+def _collect_lane_output(lane) -> None:
+    """Append what reached the lane's fd files, and any partial character, to its buffers."""
+    for attr in ("out", "err"):
+        decoder = lane.decoders.get(attr)
+        if decoder is not None:
+            getattr(lane, attr).write(decoder.decode(b"", final=True))
+        f = lane.fd_files.get(attr)
+        if f is not None:
+            f.flush()
+            f.seek(0)
+            data = f.read()
+            f.seek(0)
+            f.truncate()
+            if data:
+                getattr(lane, attr).write(data.decode("utf-8", "replace"))

@@ -69,6 +69,12 @@ class ThreadNode:
         # contextlib.redirect_stdout/stderr targets entered on this lane, innermost last
         # (capture.py, P13): the lane's writes go there instead of its buffers.
         self.redirects: dict = {"out": [], "err": []}
+        # sys.stdout.fileno() on this lane: a capture file per stream, read into the
+        # buffers after each phase (capture.py), as pytest's fd capture would.
+        self.fd_files: dict = {}
+        # bytes written to sys.stdout.buffer: decoded incrementally, so a character
+        # split across writes is not mangled.
+        self.decoders: dict = {}
         self.log_handlers = log_handlers
         self.tmp_path_factory = None  # this lane's basetemp, created on first use (isolation.py)
         self.current_item = None      # the item this lane is running, if any

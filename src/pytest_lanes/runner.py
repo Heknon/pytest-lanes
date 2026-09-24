@@ -176,6 +176,8 @@ class LaneRunner:
                 start = time.perf_counter()
                 rw = self.exclusive_lock
                 with (rw.exclusive if self.is_exclusive(item) else rw.shared)():
+                    if self.stopping(session):   # -x while this lane waited for the lock
+                        break
                     node.current_item = item     # running from here: not while waiting for the lock
                     try:
                         hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
@@ -192,8 +194,9 @@ class LaneRunner:
                 if self.stopping(session):      # as xdist's worker loop, after each item
                     break
             self._final_teardown(node)
-        except KeyboardInterrupt:
-            # As pytest after Ctrl-C (its sessionfinish): tear down what this lane holds.
+        except BaseException:
+            # Ctrl-C, pytest.exit(), or an error out of the protocol: as pytest's own
+            # sessionfinish would, tear down what this lane holds before leaving.
             node.current_item = None
             self._final_teardown(node)
             raise

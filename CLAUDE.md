@@ -76,7 +76,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 |---|---|---|
 | P1 | `session._setupstate` | Router giving each lane its own `SetupState` |
 | P2 | `FixtureDef.cached_result` / `._finalizers` / `.cached_param` | Class-level properties keyed per lane. `cached_param` is set and deleted by pytest's setuponly plugin (`--setup-show`/`--setup-only`); shared, one lane deleted it while another printed it (AttributeError, 3 of 5 runs on 3.14t) |
-| P3 | `LoggingPlugin.caplog_handler` / `.report_handler` | Per-lane dispatch; a permanent root `_LogRouter` makes pytest's concurrent handler attach/detach harmless |
+| P3 | `LoggingPlugin.caplog_handler` / `.report_handler`; `catching_logs.__enter__` (does it attach to non-propagating loggers: pytest ≥ 9) | Per-lane dispatch; a permanent root `_LogRouter` makes pytest's concurrent handler attach/detach harmless. Non-propagating loggers are routed as the installed pytest captures them: those existing at each phase start (pytest 9), none (pytest 8) |
 | P4 | pluggy `PluginManager._inner_hookexec` | Routes the 4 controller hooks to the main thread (the same slot pluggy's public `add_hookcall_monitoring` uses) |
 | P5 | `item._nodeid` | `@group` suffix under loadgroup, identical to xdist's worker |
 | P6 | `_pytest.runner._update_current_test_var` | pytest pops `PYTEST_CURRENT_TEST` without a default, so lanes finishing together raised KeyError (3 of 1,000). The replacement uses `del` + `suppress(KeyError)`, because `pop(k, None)` is check-then-delete and still races (constantly on 3.14t) |
@@ -115,7 +115,7 @@ Required flags and environment:
 
 ## Verified status
 
-- **Round 5 (review and challenge cycles):** two independent reviews, a 3.14t chaos suite (48 lanes and 2 × 24), a 4,000-test soak and a 500-lane scale run found 21 defects, including a per-test memory leak on pytest 9; all fixed test-first (DESIGN.md "Round 5"). Chaos suite 20/20 clean; suite green on 3.12 (pytest 8.0.2, 9.1.1) and 3.14t (9.1.1).
+- **Round 5 (review and challenge cycles):** two independent reviews, a 3.14t chaos suite (48 lanes and 2 × 24), a 4,000-test soak and a 500-lane scale run found 26 defects, including a per-test memory leak on pytest 9; all fixed test-first (DESIGN.md "Round 5"). Chaos suite 20/20 clean; suite green on 3.12 (pytest 8.0.2, 9.1.1) and 3.14t (9.1.1).
 - **Round 4 (plugins, OS behaviour, silent failures):** a harness ran 55 scenarios under plain, `-n`, `--lanes` and hybrid (pytest-cov, asyncio, mock, repeat, check, order, dependency, randomly, timeout, env; fork, spawn, stdin, `sys.exit`, recursion, thread exceptions, cache, stepwise, live logging, unittest, subtests, Ctrl-C). Eight bugs fixed test-first (DESIGN.md "Found and fixed in round 4"). Suite green on 3.12 (pytest 8.0.2, 9.1.1) and 3.14t (8.3.5, 9.1.1).
 - **Round 3 (edge-case sweep, 4-core container):** all tests pass on the full local matrix: CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1 and 9.1.1 / 3.8.0. The only skips are the two 3.14-only warnings tests on 3.12/3.13. Twelve bugs and four policy gaps were fixed, each test-first (DESIGN.md "Found and fixed in round 3"). The instrumentation plugin's smoke run has identical report-log output in all three modes.
 - **Round 2 (4-core container, uv):** all 18 tests pass (the 3.14 warnings test skips on 3.12/3.13) on CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, pytest 8.3.5 / xdist 3.6.1 and pytest 9.1.1 / xdist 3.8.0.

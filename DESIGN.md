@@ -171,6 +171,14 @@ Scale: 2,000 half-second tests ran in 7.9s on 500 lanes (88 MB) and 4.9s as 4 ×
 20. **An exception in a main-thread hook** (a plugin's `logreport`, a custom scheduler) abandoned every lane without teardown; xdist's workers tear down. It is now handled like Ctrl-C (lanes interrupted and torn down within the grace period), then re-raised as INTERNALERROR. An error while draining no longer skips the wait.
 21. **The patch guard flagged classes made with `type()` in a test.** A class is shared only if its module holds it (by qualified name, which covers nested classes, or under any name).
 
+**Cycle 4** review (of cycle 3 and a whole-module review of runner, single, worker and capture):
+
+22. **`-x`/`--maxfail` did not stop lanes queued behind an exclusive test** (hybrid mode): `stopping()` was checked before taking the exclusivity lock, never after, so every queued lane started its test once the failure had stopped the run. It is checked again under the lock.
+23. **`pytest.exit()` in a test skipped its lane's teardown**: only KeyboardInterrupt tore the lane down. Any exception leaving the protocol now does.
+24. **`sys.stdout.fileno()` raised on a lane** (item 19), where pytest's default fd capture gives a capture file: `subprocess.run(stdout=sys.stdout)` and `faulthandler.enable(file=sys.stdout)` failed under lanes and passed under xdist. Each lane now has its own capture file per stream, read into the test's captured output after each phase.
+25. **Non-propagating loggers were captured differently from pytest** (P3): lanes routed those that existed at session start; pytest 9 captures those that exist when each phase starts, pytest 8 none. Lanes now follow the installed pytest (detected from `catching_logs`), routing at each phase start on pytest 9 and only the root logger on pytest 8.
+26. **UTF-8 split across `sys.stdout.buffer` writes was mangled** (decoded per write); each lane decodes incrementally.
+
 **Cycle 3 challenges** (no defect found): pytest-cov reports identical coverage (lines, branches, missing lines, including code run in child threads) under `-n 2`, `--lanes 3` and `-n 2 --lanes 2`; normalized junit XML (outcomes, messages, properties, captured out/err/log) is identical in hybrid mode, and in single-process mode except for one expected difference: pytest's warning that `record_property` is incompatible with `junit_family=xunit2` appears in the test's captured stderr, as in plain pytest, because the junitxml plugin is in the same process (under xdist it lives in the controller and workers never warn). The failure-instrumentation plugin with a custom scheduler has identical report-log in all three modes and does not trip the patch guard. Crash recovery (a test killing its worker once, with and without `--max-worker-restart`) matches xdist, except for crash collateral (F5, corrected: collateral tests are not rerun).
 
 ### Silent corruption is made loud

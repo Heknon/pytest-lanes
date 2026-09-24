@@ -508,7 +508,8 @@ def test_sys_stdout_is_not_the_terminal_outside_a_redirect(pytester, name):
     # Outside a redirect, sys.stdout.fileno()/isatty() returned the real terminal's: fd
     # writes escaped the test's report (single process: to the terminal; hybrid: lost)
     # and colour detection turned on inside captured output (round-5 cycle-3 review).
-    # Like pytest's sys capture: not a tty, and no fd (so fd writes fail loudly).
+    # Not a tty, as under pytest's capture; fd writes go to a per-lane capture file
+    # (test_fd_writes_through_sys_stdout_fileno_are_captured).
     pytester.makepyfile("""
         import io, sys, pytest
         def test_it():
@@ -517,12 +518,72 @@ def test_sys_stdout_is_not_the_terminal_outside_a_redirect(pytester, name):
     run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=1)
 
 
-@pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "1", "--lanes", "3"]], ids=["lanes", "hybrid"])
-def test_stdout_has_no_fileno_on_a_lane(pytester, mode):
+# ---------------------------------------------------------------- cycle-4 review
+@pytest.mark.parametrize("name", MODES.keys())
+def test_fd_writes_through_sys_stdout_fileno_are_captured(pytester, name):
+    # Under fd capture (pytest's default) sys.stdout.fileno() is a capture file: a child
+    # process given stdout=sys.stdout, or faulthandler, writes into the test's report.
+    # Lanes raised UnsupportedOperation; each lane now has its own capture file.
+    import json
     pytester.makepyfile("""
-        import io, sys, pytest
-        def test_it():
-            with pytest.raises(io.UnsupportedOperation):
-                sys.stdout.fileno()
+        import faulthandler, subprocess, sys
+        def test_sub():
+            subprocess.run([sys.executable, "-c", "print('from-child')"], stdout=sys.stdout, check=True)
+            assert 0
+        def test_fh():
+            faulthandler.enable(file=sys.stdout)
+            faulthandler.disable()
     """)
-    run(pytester, *mode, timeout=60).assert_outcomes(passed=1)
+    result, _ = report_log(pytester, *MODES[name], timeout=60)
+    result.assert_outcomes(passed=1, failed=1)
+    call = [e for e in map(json.loads, open(pytester.path / "rl.jsonl"))
+            if e.get("$report_type") == "TestReport" and e["nodeid"].endswith("test_sub") and e["when"] == "call"][0]
+    assert any("from-child" in text for title, text in call["sections"] if "stdout" in title), call["sections"]
+
+
+NONPROPAGATING = """
+import logging
+EARLY = logging.getLogger("early.private"); EARLY.propagate = False
+"""
+
+
+@pytest.mark.parametrize("name", ["lanes", "hybrid"])
+def test_non_propagating_logger_capture_matches_xdist(pytester, name):
+    # pytest 9 captures non-propagating loggers that exist when each phase starts; pytest 8
+    # never does. Lanes attached once, at session start: both versions diverged.
+    pytester.makeconftest(NONPROPAGATING)
+    pytester.makepyfile("""
+        import logging
+        MOD = logging.getLogger("module.private"); MOD.propagate = False
+        def test_early(caplog):
+            logging.getLogger("early.private").warning("early record")
+            print(sorted(r.getMessage() for r in caplog.records))
+        def test_module(caplog):
+            MOD.warning("module record")
+            print(sorted(r.getMessage() for r in caplog.records))
+    """)
+    xdist = report_log(pytester, *MODES["xdist"], "-rA", timeout=60)
+    lanes = report_log(pytester, *MODES[name], "-rA", timeout=60)
+    assert lanes[1] == xdist[1]
+
+    def printed(result):
+        return sorted(l for l in result.stdout.lines if l.startswith("[") and "record" in l)
+    assert printed(lanes[0]) == printed(xdist[0])
+
+
+def test_utf8_split_across_buffer_writes(pytester):
+    # Bytes written to sys.stdout.buffer were decoded one write at a time, so a character
+    # split across writes (a child's output streamed in chunks) came out as U+FFFD.
+    import json
+    pytester.makepyfile("""
+        import sys
+        def test_it():
+            for b in "h\\u00e9llo \\u2713".encode():
+                sys.stdout.buffer.write(bytes([b]))
+            sys.stdout.buffer.write(b"\\n")
+    """)
+    result, _ = report_log(pytester, "--lanes", "2", timeout=60)
+    result.assert_outcomes(passed=1)
+    call = [e for e in map(json.loads, open(pytester.path / "rl.jsonl"))
+            if e.get("$report_type") == "TestReport" and e["when"] == "call"][0]
+    assert ["h\u00e9llo \u2713\n"] == [t for n, t in call["sections"] if "stdout" in n], call["sections"]
