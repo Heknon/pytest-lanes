@@ -19,6 +19,7 @@ Module map:
     capture.py       per-lane stdout/stderr and logging (P3)
     hookrouting.py   the 4 controller hooks replayed on the main thread (P4)
     compat.py        shims for third-party plugins that assume one test per process (C1)
+    integrity.py     run-time check that reports match what the lanes ran
     probes.py        fail-closed startup checks of every internal we touch
 
 This module must stay free of logic: pytest registers it as a plugin, so any

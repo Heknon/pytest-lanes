@@ -111,6 +111,17 @@ An adversarial sweep ran about 60 scenarios under `-n`, `--lanes` and hybrid, an
 
 Verified to match xdist, and now locked in by tests: every outcome kind under all four dist modes (including unittest, doctests, xfail/xpass/strict, setup and teardown errors, and odd parametrize IDs), junitxml, rerunfailures, pytest-html, `--co`/`--setup-*`, empty and deselected runs, lane-count extremes, a lane dying inside the protocol (INTERNALERROR, no hang), `KeyboardInterrupt`, `pytest.exit`, and hybrid restart exhaustion. A 3,000-test × 200-lane stress run on 3.12 and 3.14t produced every report exactly once.
 
+### Silent corruption is made loud
+
+A race that crashes is found. The dangerous kind would leave a run green while a report, an output or a fixture value belonged to another test. Two defences:
+
+1. **A run-time integrity check in every run (`integrity.py`).** On each lane, every routed `logstart`/`logreport`/`logfinish` must name the item that lane is running. On the main thread, each lane's replayed stream must nest: logstart, that item's reports, logfinish. When a lane reports an item done, the replay must just have shown its logstart and logfinish: this is exact, because a lane's hook calls precede its `ItemDone` in one FIFO queue and the lane waits for its acknowledgement. In single-process mode, a run that was not stopped must have run every collected item as many times as it was collected. Any violation fails the run with INTERNALERROR (exit 3), listing what was wrong. It uses only lanes' own state: no new touchpoint.
+   - A plugin that logs a report for an item other than the one running would be flagged. No known plugin does (rerunfailures and subtests report the running item).
+   - **xdist hides worker INTERNALERRORs:** its controller prints one and the run can still exit 0 (xdist 3.8.0, plain `-n`: "3 passed", exit 0). The hybrid controller (`LanesController`) sets the exit status to INTERNALERROR whenever a worker reports one, so a failed check in a hybrid worker cannot look green.
+2. **A canary suite under maximum switching pressure (`tests/test_integrity.py`).** 200 tests on 48 lanes (or 2 × 24), with `sys.setswitchinterval(1e-6)`. Each test checks that its session, module, class and function fixtures, `worker_id`, `tmp_path` and caplog records are its own, and prints, logs and writes to stderr a token 30 times. Every section of every report must contain only its test's token, exactly 30 times, and the report-log rows must equal plain xdist's. Repeat it with `RUNS=N scripts/matrix.sh` to hunt rare races.
+
+Still out of reach of both: process-global state mutated by the tests themselves (F1), and output from threads a test spawns (F3).
+
 ## Sizing: processes × lanes
 
 Measured on a 1-core sandbox, running 1,000 trivial I/O tests (3s each):
@@ -170,7 +181,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 - A CI matrix: the oldest supported pytest/xdist, the current releases, and pytest plus xdist `main` nightly.
 - Upper-bound pins, raised only after the contract suite passes.
 - A parity job that runs a real slice of your suite under plain `-n`, under `--lanes`, and under `-n --lanes`, then diffs report-log.
-- Upstream candidates: a public per-context SetupState and fixture cache in pytest (removes P1, P2 and P6), a documented node protocol plus a lane-capable worker hook in xdist (removes X1–X4), and a `pop(..., None)` fix for `PYTEST_CURRENT_TEST`.
+- Upstream candidates: a public per-context SetupState and fixture cache in pytest (removes P1, P2 and P6), a documented node protocol plus a lane-capable worker hook in xdist (removes X1–X4), a `pop(..., None)` fix for `PYTEST_CURRENT_TEST`, and making a worker's INTERNALERROR fail an xdist run (3.8.0 can exit 0).
 
 ## Not yet tested
 

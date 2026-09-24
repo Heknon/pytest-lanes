@@ -33,6 +33,7 @@ Any change that breaks one of these is a regression.
 3. **Fail closed.** Every use of a pytest, pluggy or xdist internal is feature-probed at startup. If a probe fails, the plugin raises `UsageError` with an explanation instead of running incorrectly. Never add a new internal touchpoint without all three of: a probe, an entry in the touchpoint table below and in DESIGN.md, and a contract test.
 4. **Plugins that observe xdist must keep working.** Terminal, junitxml, report-log, pytest-html, pytest-metadata, pytest-cov, rerunfailures, and the user's own failure-instrumentation plugin. xdist node hooks go only to allowlisted plugins in single-process mode, because pytest-metadata uses `pytest_testnodedown` as a data-transfer protocol and crashed when it received them.
 5. **No new dependency on process-global state in the runner.** Per-lane state lives on the `ThreadNode`, keyed by the `_LANE` contextvar.
+6. **Silent corruption must be loud.** A run whose report stream doesn't match what its lanes ran fails with INTERNALERROR (`integrity.py`), in every mode; never downgrade that to a warning. In hybrid mode a worker's INTERNALERROR fails the run, although plain xdist 3.8.0 exits 0 on one.
 
 ## File map
 
@@ -51,6 +52,7 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 | `capture.py` | Per-lane stdout/stderr and logging; logging's logger registry made safe to iterate | P3, P8 |
 | `hookrouting.py` | `ControllerHookRouter`: the 4 controller hooks queued on lanes and replayed on the main thread | P4 |
 | `compat.py` | Shims for third-party plugins that assume one test at a time per process | C1 |
+| `integrity.py` | `Ledger`: the run-time integrity check. Each lane's routed hooks name the item it runs, replayed streams nest (logstart, reports, logfinish), each done item was logged, and (single process) every collected item ran as often as collected | |
 | `probes.py` | Fail-closed startup checks, one function per touchpoint | all except P1, P5 |
 
 Mode selection in `pytest_configure`:
@@ -60,7 +62,7 @@ Mode selection in `pytest_configure`:
 
 Other files:
 
-- `tests/` is the spec: pytester subprocess tests (about 110) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes) and `test_isolation.py` (output, logging, basetemp, worker identity, warnings). Shared helpers live in `tests/lanes_testing.py`.
+- `tests/` is the spec: pytester subprocess tests (about 120) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes), `test_isolation.py` (output, logging, basetemp, worker identity, warnings) and `test_integrity.py` (the integrity check, and a canary suite under maximum thread-switching pressure). Shared helpers live in `tests/lanes_testing.py`.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is a draft CI workflow, manual-only (`workflow_dispatch`): GitHub runners are paid.
@@ -92,7 +94,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
-.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~110 tests, ~40s
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~120 tests, ~40s
 scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
@@ -169,7 +171,7 @@ These are not bugs to "fix" by weakening the invariants.
 9. **CI.** Make `.github/workflows/ci.yml` actually run, including the nightly job against pytest and xdist `main`. If the user's environment is air-gapped, adapt `scripts/matrix.sh` to a local package index instead.
 10. **Upstream.** Draft two issues:
     - pytest: `PYTEST_CURRENT_TEST` should use `pop(..., None)`, plus a public API for per-context SetupState and fixture caches, to remove P1, P2 and P6.
-    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X4. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers.
+    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X4. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers. And that a worker's INTERNALERROR is printed by the controller but the run can still exit 0 (verified on xdist 3.8.0: "3 passed", exit 0).
 
 ## Working rules
 

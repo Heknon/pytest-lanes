@@ -135,10 +135,25 @@ class LaneMux:
 
 
 class LanesController:
-    """Plugin registered on the hybrid controller: wraps the scheduler in a LaneMux."""
+    """Plugin registered on the hybrid controller: wraps the scheduler in a LaneMux.
+
+    It also makes a worker's INTERNALERROR fail the run. xdist's controller prints
+    it (via ``pytest_internalerror``) and carries on, and the run can still exit 0
+    (xdist 3.8.0). A worker's lanes report a failed integrity check that way
+    (integrity.py), and such a run must not look green.
+    """
 
     def __init__(self, config) -> None:
         self.m = config.getoption("lanes")
+        self.internal_error = False
+
+    def pytest_internalerror(self, excrepr, excinfo):
+        self.internal_error = True
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_sessionfinish(self, session):
+        if self.internal_error:
+            session.exitstatus = pytest.ExitCode.INTERNAL_ERROR
 
     @pytest.hookimpl(wrapper=True)
     def pytest_xdist_make_scheduler(self, config, log):

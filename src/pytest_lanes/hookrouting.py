@@ -37,6 +37,7 @@ class HookCall(NamedTuple):
     impls: list
     kwargs: dict
     firstresult: bool
+    lane: str  # the id of the lane that made the call
 
 
 class ControllerHookRouter:
@@ -45,25 +46,29 @@ class ControllerHookRouter:
     ``set_report_node``: in single-process mode ``report.node`` is set to the lane,
     as xdist's controller sets it to the worker. A hybrid worker must not set it,
     because its reports are serialized to the controller; ``report.lane_id`` (a
-    string) is set in both modes.
+    string) is set in both modes. ``ledger`` (integrity.py) sees each routed call
+    on the lane that makes it.
     """
 
-    def __init__(self, pluginmanager, events, session, *, set_report_node: bool) -> None:
+    def __init__(self, pluginmanager, events, session, *, set_report_node: bool, ledger) -> None:
         self._pm = pluginmanager
         self._events = events
         self._session = session
         self._set_report_node = set_report_node
+        self._ledger = ledger
         self._inner = None
 
     def __enter__(self):
         self._inner = inner = self._pm._inner_hookexec
         events, session, set_report_node = self._events, self._session, self._set_report_node
+        ledger = self._ledger
         session_lock = threading.Lock()
 
         def hookexec(name, impls, kwargs, firstresult):
             lane = LANE.get()
             if lane is None or name not in ROUTED:
                 return inner(name, impls, kwargs, firstresult)
+            ledger.emitted(lane, name, kwargs)
             if name == "pytest_runtest_logreport":
                 report = kwargs["report"]
                 report.lane_id = lane.gateway.id
@@ -74,7 +79,7 @@ class ControllerHookRouter:
                     with session_lock:
                         inner(name, on_lane, kwargs, firstresult)
                     impls = [i for i in impls if i.plugin is not session]
-            events.put(HookCall(name, impls, kwargs, firstresult))
+            events.put(HookCall(name, impls, kwargs, firstresult, lane.gateway.id))
             return None if firstresult else []
 
         self._pm._inner_hookexec = hookexec
@@ -84,4 +89,4 @@ class ControllerHookRouter:
         self._pm._inner_hookexec = self._inner
 
     def replay(self, call: HookCall):
-        return self._inner(*call)
+        return self._inner(call.name, call.impls, call.kwargs, call.firstresult)

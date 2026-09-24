@@ -29,6 +29,7 @@ import pytest
 
 from .capture import capture_phase
 from .hookrouting import ControllerHookRouter, HookCall
+from .integrity import Ledger
 from .isolation import isolate_lanes
 from .lane import LANE, SHUTDOWN, ThreadNode
 
@@ -47,6 +48,7 @@ class ItemDone(NamedTuple):
 
     node: ThreadNode
     index: int
+    nodeid: str
     duration: float
     ack: threading.Event
 
@@ -64,6 +66,7 @@ class LaneRunner:
         self.errors: list = []                     # exceptions escaping a lane thread
         self.teardown_errors: list = []            # (lane id, error) from teardown after a stop
         self.exclusive_lock = ReadWriteLock()
+        self.ledger = Ledger()                     # run-time integrity check (integrity.py)
         self._session_stack = contextlib.ExitStack()
 
     # ---- session-long install / uninstall -------------------------------------
@@ -72,7 +75,8 @@ class LaneRunner:
         stack = self._session_stack
         self.lane_state = stack.enter_context(isolate_lanes(self.config, session, self.is_exclusive))
         self.hooks = stack.enter_context(ControllerHookRouter(
-            self.config.pluginmanager, self.events, session, set_report_node=self.set_report_node))
+            self.config.pluginmanager, self.events, session, set_report_node=self.set_report_node,
+            ledger=self.ledger))
 
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(self, session):
@@ -156,7 +160,7 @@ class LaneRunner:
                 # Wait until the main thread has replayed this item's reports and
                 # told the scheduler, so -x/--maxfail stop exactly as a sequential run does.
                 ack = threading.Event()
-                self.events.put(ItemDone(node, index, time.perf_counter() - start, ack))
+                self.events.put(ItemDone(node, index, item.nodeid, time.perf_counter() - start, ack))
                 ack.wait()
                 if self.stopping(session):      # as xdist's worker loop, after each item
                     break
@@ -200,10 +204,12 @@ class LaneRunner:
                     break
                 continue
             if isinstance(event, HookCall):
+                self.ledger.replayed(event.lane, event.name, event.kwargs)
                 if before_replay is not None:
                     before_replay(event)
                 self.hooks.replay(event)
                 continue
+            self.ledger.item_done(event.node.gateway.id, event.nodeid)
             if on_done is not None:
                 on_done(event.node, event.index, event.duration)
             if sched is not None:
@@ -222,6 +228,7 @@ class LaneRunner:
         self.teardown_errors.clear()
         if self.errors:
             raise self.errors[0]
+        self.ledger.raise_if_violated()
 
 
 class ReadWriteLock:

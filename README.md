@@ -144,6 +144,7 @@ src/pytest_lanes/
   capture.py       per-lane stdout/stderr and logging                    (P3, P8)
   hookrouting.py   the 4 controller hooks, replayed on the main thread   (P4)
   compat.py        shims for third-party plugins (pytest-rerunfailures)  (C1)
+  integrity.py     run-time check: reports match what lanes ran, else INTERNALERROR
   probes.py        fail-closed startup checks
 tests/test_contract.py   the spec: pytester subprocess tests, incl. parity against plain -n
 scripts/matrix.sh        contract suite across Python x pytest/xdist versions (uv)
@@ -157,6 +158,7 @@ demo/                    manual smoke run (see demo/README.md)
 | Fix output or log lines attributed to the wrong test | `capture.py` |
 | Fix fixture or teardown state leaking between lanes | `isolation.py` (P1 SetupState, P2 fixture caches) |
 | Fix a reporter that sees wrong or out-of-order hooks | `hookrouting.py` |
+| Understand an "integrity check failed" INTERNALERROR | `integrity.py` |
 | Change hybrid-mode messaging or crash handling | `controller.py` (controller side), `worker.py` (process side) |
 | Add support for a new pytest or xdist version | Run `scripts/matrix.sh`; a failing startup probe names the touchpoint, and the touchpoint's ID leads to its module |
 | Touch a new pytest/xdist internal | Don't, unless unavoidable. Otherwise: a context manager in the owning module, a check in `probes.py`, a row in the touchpoint tables (CLAUDE.md, DESIGN.md), and a contract test |

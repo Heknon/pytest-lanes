@@ -69,6 +69,9 @@ class SingleProcessSession(LaneRunner):
                 for n in nodes:
                     node_hooks.down(node=n, error=None)
 
+        if not self.stopping(session):
+            self.ledger.check_complete(session.items)
+            self.ledger.raise_if_violated()
         if session.shouldfail or session.shouldstop:   # xdist's DSession: Interrupted either way
             raise session.Interrupted(session.shouldfail or session.shouldstop)
         return True
