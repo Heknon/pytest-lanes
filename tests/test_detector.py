@@ -185,8 +185,11 @@ def test_process_state_changed_by_fixtures_is_unsafe(pytester):
             monkeypatch.syspath_prepend("/nonexistent")
     """)
     _, report = detect(pytester)
-    unsafe = findings(report, "per-test")
+    unsafe = {**findings(report, "per-test"), **findings(report, "patched")}
     assert "logging:infra.level" in unsafe and "sys.path" in unsafe, report
+    # Every test that changed shared state, for marking lanes_exclusive.
+    assert report["unsafe_tests"] == sorted(
+        [f"test_a.py::test_level[{i}]" for i in range(2)] + [f"test_a.py::test_path[{i}]" for i in range(2)])
 
 
 def test_clean_suite_reports_nothing_unsafe(pytester):
@@ -245,3 +248,49 @@ def test_detect_refuses_to_run_concurrently(pytester, mode):
     r = run(pytester, *DETECT, *mode)
     assert r.ret == pytest.ExitCode.USAGE_ERROR
     r.stderr.fnmatch_lines(["*--lanes-detect runs tests one at a time*"])
+
+
+# ---------------------------------------------------------------- keeping the report readable
+def test_clearing_the_environment_is_one_finding(pytester, monkeypatch):
+    for i in range(30):
+        monkeypatch.setenv(f"LANES_BULK_{i}", "x")
+    pytester.makepyfile(test_a="""
+        import os
+        from unittest import mock
+        def test_clear():
+            with mock.patch.dict(os.environ, clear=True):
+                pass
+    """)
+    _, report = detect(pytester)
+    patched = findings(report, "patched")
+    assert "env:*" in patched, report
+    assert not any(p.startswith("env:LANES_BULK_") for p in patched), report
+
+
+def test_a_patched_global_is_reported_once(pytester):
+    pytester.makepyfile(infra="def connect(): return 'real'\n")
+    pytester.makepyfile(test_a="""
+        import pytest, infra
+        @pytest.mark.parametrize("i", range(2))
+        def test_t(i, monkeypatch):
+            monkeypatch.setattr(infra, "connect", lambda: "fake")
+            monkeypatch.setenv("LANES_X", str(i))
+    """)
+    _, report = detect(pytester)
+    patched, per_test = findings(report, "patched"), findings(report, "per-test")
+    assert "infra.connect" in patched and "env:LANES_X" in patched, report
+    assert "module:infra.connect" not in per_test and "env:LANES_X" not in per_test, report
+
+
+def test_ok_findings_are_counted_not_listed(pytester):
+    pytester.makepyfile(infra="CACHE = {}\n")
+    pytester.makepyfile(test_a="""
+        import infra
+        def test_t():
+            infra.CACHE["k"] = 1
+    """)
+    r, report = detect(pytester)
+    assert "module:infra.CACHE" in findings(report, "set-once"), report
+    out = r.stdout.str()
+    assert "module:infra.CACHE" not in out, out
+    r.stdout.fnmatch_lines(["*1 set-once (caches set once, then stable)*JSON*"])

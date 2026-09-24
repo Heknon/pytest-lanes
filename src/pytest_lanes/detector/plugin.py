@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from .classify import NOTES, Collector
+from .classify import NOTES, Collector, unsafe_tests
 from .recorder import Recorder, check_d1
 from .report import write_json, write_terminal
 from .sources import Sources
@@ -70,13 +70,14 @@ class SharedStateDetector:
             self._during[item.nodeid] = self.sources.snapshot()   # fixtures still active
 
     def report(self) -> dict:
+        findings = self.collector.findings()
         return {"tests": self.collector.tests, "paths": self._paths,
-                "truncated": self.sources.truncated, "findings": self.collector.findings(),
-                "notes": NOTES}
+                "truncated": self.sources.truncated, "findings": findings,
+                "unsafe_tests": unsafe_tests(findings), "notes": NOTES}
 
     def pytest_terminal_summary(self, terminalreporter):
         report = self.report()
-        write_terminal(terminalreporter, report)
         path = self.config.getoption("lanes_detect_report")
+        write_terminal(terminalreporter, report, path)
         if path:
             write_json(path, report)

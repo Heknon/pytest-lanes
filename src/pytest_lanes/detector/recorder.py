@@ -7,7 +7,9 @@ recorder catches these as they happen:
 
 * ``unittest.mock``: ``patch``, ``patch.object``, ``patch.multiple`` and
   ``patch.dict``, and therefore pytest-mock (touchpoint D1: the private
-  ``_patch.__enter__`` and ``_patch_dict._patch_dict``, probed by ``check_d1``);
+  ``_patch.__enter__`` and ``_patch_dict._patch_dict``/``_unpatch_dict``, probed
+  by ``check_d1``). ``patch.dict(os.environ, ...)`` is recorded by its keys (or
+  ``env:*`` with ``clear=True``), because it rewrites every variable;
 * pytest's ``MonkeyPatch`` (public API): ``setattr``, ``delattr``, ``setitem``,
   ``delitem``, ``setenv``, ``delenv``, ``chdir`` and ``syspath_prepend``;
 * Python audit events ``os.putenv``, ``os.unsetenv`` and ``os.chdir`` (public),
@@ -38,8 +40,9 @@ def check_d1() -> str | None:
     dict_cls = getattr(mock, "_patch_dict", None)
     if patch_cls is None or not hasattr(patch_cls, "__enter__"):
         return "D1 unittest.mock._patch.__enter__"
-    if dict_cls is None or not callable(getattr(dict_cls, "_patch_dict", None)):
-        return "D1 unittest.mock._patch_dict._patch_dict"
+    if dict_cls is None or not all(callable(getattr(dict_cls, m, None))
+                                   for m in ("_patch_dict", "_unpatch_dict")):
+        return "D1 unittest.mock._patch_dict._patch_dict/_unpatch_dict"
     try:
         probe = patch_cls.__new__(patch_cls)
         probe.__init__(lambda: os, "sep", mock.DEFAULT, None, False, None, None, None, {})
@@ -67,11 +70,19 @@ class Recorder:
         self._owner = None          # the thread running the test being recorded
         self.targets: set = set()
         self._lock = threading.Lock()
+        self._muted = 0             # inside patch.dict(os.environ): it rewrites every key
 
     def add(self, target: str) -> None:
         if self._active and threading.current_thread() is self._owner:
             with self._lock:
                 self.targets.add(target)
+
+    def muted(self, fn, *args):
+        self._muted += 1
+        try:
+            return fn(*args)
+        finally:
+            self._muted -= 1
 
     # ---- per test ---------------------------------------------------------------
     def start(self) -> None:
@@ -104,16 +115,33 @@ class Recorder:
                     return original(self)
                 return __enter__
 
+            def environ(target) -> bool:
+                return target is os.environ or target == "os.environ"
+
             def mock_patch_dict(original):
                 def _patch_dict(self):
                     target = self.in_dict
-                    if target is not os.environ:   # os.environ keys come from the audit hook
-                        rec.add(f"patch.dict({target if isinstance(target, str) else _name(target)})")
+                    if environ(target):
+                        # Name the patched keys: the patch rewrites the whole environment.
+                        if self.clear:
+                            rec.add("env:*")
+                        for key in self.values:
+                            rec.add(f"env:{key}")
+                        return rec.muted(original, self)
+                    rec.add(f"patch.dict({target if isinstance(target, str) else _name(target)})")
                     return original(self)
                 return _patch_dict
 
+            def mock_unpatch_dict(original):
+                def _unpatch_dict(self):
+                    if environ(self.in_dict):
+                        return rec.muted(original, self)
+                    return original(self)
+                return _unpatch_dict
+
             patch_attr(mock._patch, "__enter__", mock_enter)
             patch_attr(mock._patch_dict, "_patch_dict", mock_patch_dict)
+            patch_attr(mock._patch_dict, "_unpatch_dict", mock_unpatch_dict)
 
             mp = pytest.MonkeyPatch
 
@@ -158,7 +186,7 @@ class Recorder:
             # setenv/delenv/chdir reach os.putenv/unsetenv/chdir: the audit hook names them.
 
             def audit(event, args):
-                if not rec._active:
+                if not rec._active or rec._muted:
                     return
                 if event in ("os.putenv", "os.unsetenv"):
                     key = _env_key(args[0])

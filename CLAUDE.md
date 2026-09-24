@@ -90,7 +90,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
 | X4 | hybrid controller: `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Mirrored on each `LaneProxy`, so a custom scheduler or plugin reading them sees a worker (`workerinput` gets the lane's id and the total lane count). Probed by checking the xdist code that sets them |
-| D1 | `--lanes-detect` only: stdlib `unittest.mock._patch.__enter__` (and `.getter`/`.attribute`), `_patch_dict._patch_dict` | Records patches applied inside a test body, which no snapshot sees. Probed by `detector.recorder.check_d1` (a UsageError for `--lanes-detect` if it fails); never installed in a lanes run |
+| D1 | `--lanes-detect` only: stdlib `unittest.mock._patch.__enter__` (and `.getter`/`.attribute`), `_patch_dict._patch_dict` / `._unpatch_dict` | Records patches applied inside a test body, which no snapshot sees. Probed by `detector.recorder.check_d1` (a UsageError for `--lanes-detect` if it fails); never installed in a lanes run |
 
 ## How to run
 

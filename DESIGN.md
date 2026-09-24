@@ -64,7 +64,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
 | X4 | `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Hybrid mode only; mirrored on each `LaneProxy` so custom schedulers see worker-shaped nodes |
-| D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
+| D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` / `_unpatch_dict` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
 
 ## Verified
 

@@ -22,7 +22,9 @@ set-once   persisted in exactly one test, then stable   ok
 
 A path inside one that is already reported with the same or a higher severity is
 left out: the new object that a per-test field points to, or the entries of a
-cache that was filled once.
+cache that was filled once. A module global that was patched is reported once, as
+``patched``. A test that changes more than ``ENV_BULK`` environment variables
+(``patch.dict(os.environ, clear=True)``) gives one ``env:*`` finding.
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ SEVERITY = {"per-test": "unsafe", "patched": "unsafe", "grows": "check", "set-on
 _RANK = {"unsafe": 2, "check": 1, "ok": 0}
 _CONTAINERS = ("dict", "seq", "set")
 EXAMPLES = 3
+ENV_BULK = 20
 
 NOTES = {
     "per-test": "changes while tests run, so concurrent tests see each other's value. "
@@ -71,6 +74,17 @@ class Collector:
     def add_test(self, nodeid: str, a: dict, b: dict, c: dict, patched) -> None:
         self.tests += 1
         changed = {k for k, _ in a.items() ^ b.items()} | {k for k, _ in a.items() ^ c.items()}
+        env = {p for p in changed if p.startswith("env:")}
+        if len(env) > ENV_BULK:
+            changed -= env
+            if any(a.get(p) != c.get(p) for p in env):
+                self._persisted["env:*"].append((nodeid, ("env", 0), ("env", 1)))
+            else:
+                self._temporary["env:*"].append(nodeid)
+        patched = set(patched)
+        env = {p for p in patched if p.startswith("env:")}
+        if len(env) > ENV_BULK:
+            patched = (patched - env) | {"env:*"}
         for path in changed:
             before, during, after = a.get(path), b.get(path), c.get(path)
             if before != after:
@@ -92,8 +106,9 @@ class Collector:
             raw[path] = (kind, nodeids)
 
         kept = []
+        patched = set(self._patched)
         for path, (kind, nodeids) in raw.items():
-            if self.ignored(path):
+            if self.ignored(path) or path in patched or (path.startswith("module:") and path[7:] in patched):
                 continue
             rank = _RANK[SEVERITY[kind]]
             if any(p in raw and _RANK[SEVERITY[raw[p][0]]] >= rank for p in ancestors(path)):
@@ -116,4 +131,9 @@ def _grew(persisted) -> bool:
 
 def _finding(kind: str, path: str, nodeids: list) -> dict:
     return {"kind": kind, "severity": SEVERITY[kind], "path": path, "tests": len(nodeids),
-            "examples": nodeids[:EXAMPLES], "note": NOTES[kind]}
+            "examples": nodeids[:EXAMPLES], "note": NOTES[kind], "nodeids": nodeids}
+
+
+def unsafe_tests(findings: list) -> list:
+    """Every test behind an unsafe finding: the candidates for lanes_exclusive."""
+    return sorted({n for f in findings if f["severity"] == "unsafe" for n in f["nodeids"]})
