@@ -466,3 +466,38 @@ def test_sys_stdout_inside_a_redirect_is_the_target(pytester, name):
                 assert sys.stdout.getvalue() == "x\\n"
     """)
     run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=2)
+
+
+@pytest.mark.parametrize("name", MODES.keys())
+def test_sys_stdout_behaves_like_a_real_stream(pytester, name):
+    # io.TextIOBase defines encoding/errors/closed/close/seek/... so they never reached the
+    # redirect target or the real stream: under lanes sys.stdout.encoding was None, seek()
+    # inside redirect_stdout(StringIO()) raised, and close() there closed stdout for every
+    # lane (round-5 cycle-2 review).
+    pytester.makepyfile("""
+        import contextlib, io, sys, time
+        def test_attrs():
+            s = sys.stdout
+            assert s.encoding and s.writable() and not s.closed
+            assert s.encoding == sys.__stdout__.encoding
+        def test_redirect_io():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                s = sys.stdout
+                assert (s.writable(), s.seekable(), s.readable()) == (True, True, buf.readable())
+                s.write("abc"); s.seek(0); s.truncate(0); print("x")
+                assert s.tell() == 2
+                s.writelines(["y\\n"])
+            assert buf.getvalue() == "x\\ny\\n"
+        def test_close_closes_the_target_only():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sys.stdout.close()
+            assert buf.closed and not sys.stdout.closed
+            print("still fine")
+        def test_other_lane_keeps_writing():
+            time.sleep(0.3)
+            sys.stdout.writelines(["line\\n"])
+            assert not sys.stdout.closed
+    """)
+    run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=4)

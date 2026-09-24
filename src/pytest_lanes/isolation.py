@@ -130,7 +130,10 @@ class _PerLaneAttribute:
         lane = LANE.get()
         if lane is None:
             return obj.__dict__.setdefault("_lanes_main_attrs", {})
-        return lane.fixture_state.setdefault((obj, "attrs"), {})
+        attrs = lane.fixture_attrs.get(obj)
+        if attrs is None:
+            attrs = lane.fixture_attrs[obj] = {}
+        return attrs
 
     def __get__(self, obj, cls=None):
         if obj is None:
@@ -384,10 +387,15 @@ def check_p14():
 
 def _shared(target) -> bool:
     """A module or a class is shared by every lane; an instance, or a class defined
-    inside a function (``<locals>``), is presumed the test's own."""
+    inside a function (``<locals>``) that no module holds, is presumed the test's own."""
     if isinstance(target, types.ModuleType):
         return True
-    return isinstance(target, type) and "<locals>" not in getattr(target, "__qualname__", "")
+    if not isinstance(target, type):
+        return False
+    if "<locals>" not in getattr(target, "__qualname__", ""):
+        return True
+    module = sys.modules.get(getattr(target, "__module__", None) or "")
+    return module is not None and any(v is target for v in list(vars(module).values()))
 
 
 def _patch_by_path(patcher) -> bool:
@@ -400,8 +408,10 @@ def _patch_by_path(patcher) -> bool:
 
 
 def _from_pytest(frame) -> bool:
-    """The patch is pytest's own (its unittest plugin patches twisted around each test)."""
-    return str(frame.f_globals.get("__name__", "")).split(".")[0] == "_pytest"
+    """The patch is pytest's twisted support (its unittest plugin patches twisted's
+    Failure around each test). Only that module: pytester, also pytest's, changes the
+    cwd and environment for the whole process and stays guarded."""
+    return frame.f_globals.get("__name__") == "_pytest.unittest"
 
 
 
@@ -433,11 +443,16 @@ def guard_process_patches(config, is_exclusive):
         if lane is None or _from_pytest(frame):
             return
         item = lane.current_item
-        if item is None or is_exclusive(item) or item.get_closest_marker("lanes_allow_patches"):
+        if item is None or lane.gateway.id == "ln-serial":   # the serial phase runs alone
             return
+        # A fixture broader than the test outlives it, so even an exclusive test's
+        # module or session fixture leaves its patch in place for the lane's next tests
+        # (hybrid mode runs exclusive tests between others).
         scope = lane.fixture_scopes[-1] if lane.fixture_scopes else "function"
         if scope in ("session", "package", "module", "class"):
             pytest.fail(PATCH_GUARD_SESSION_MESSAGE.format(what=what, scope=scope), pytrace=False)
+        if is_exclusive(item) or item.get_closest_marker("lanes_allow_patches"):
+            return
         pytest.fail(PATCH_GUARD_MESSAGE.format(what=what), pytrace=False)
 
     notset = object()

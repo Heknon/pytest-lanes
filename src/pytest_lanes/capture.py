@@ -70,21 +70,85 @@ class _LaneStream(io.TextIOBase):
             return None if target is None else target.flush()
         self._real.flush()
 
-    # Inside a redirect, sys.stdout stands for the target (subprocess(stdout=sys.stdout),
-    # sys.stdout.getvalue()): io.TextIOBase defines these, so __getattr__ never sees them.
-    def fileno(self):
+    # sys.stdout stands for the redirect target inside a redirect, and for the real stream
+    # otherwise (encoding, seek(), subprocess(stdout=sys.stdout), ...). io.TextIOBase
+    # defines these itself, so __getattr__ would never see them: each is delegated here.
+    def _stream(self, name):
         redirected, target = self._redirect()
         if redirected:
             if target is None:
-                raise io.UnsupportedOperation("fileno")
-            return target.fileno()
-        return self._real.fileno()
+                raise io.UnsupportedOperation(name)
+            return target
+        return self._real
+
+    def fileno(self):
+        return self._stream("fileno").fileno()
 
     def isatty(self):
         redirected, target = self._redirect()
-        if redirected:
-            return bool(target is not None and target.isatty())
-        return self._real.isatty()
+        if redirected and target is None:
+            return False
+        return self._stream("isatty").isatty()
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        redirected, target = self._redirect()
+        return bool(redirected and target is not None and target.readable())
+
+    def seekable(self):
+        redirected, target = self._redirect()
+        return bool(redirected and target is not None and target.seekable())
+
+    def seek(self, *args):
+        return self._redirect_only("seek").seek(*args)
+
+    def tell(self):
+        return self._redirect_only("tell").tell()
+
+    def truncate(self, *args):
+        return self._redirect_only("truncate").truncate(*args)
+
+    def _redirect_only(self, name):
+        redirected, target = self._redirect()
+        if redirected and target is not None:
+            return target
+        raise io.UnsupportedOperation(name)
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def close(self):
+        # Inside a redirect, close the target, as plain Python does. Outside one, this
+        # stream is every lane's stdout: a test closing it must not close it for the rest.
+        redirected, target = self._redirect()
+        if redirected and target is not None:
+            target.close()
+
+    @property
+    def closed(self):
+        redirected, target = self._redirect()
+        return bool(redirected and target is not None and target.closed)
+
+    @property
+    def encoding(self):
+        redirected, target = self._redirect()
+        stream = target if redirected and target is not None else self._real
+        return getattr(stream, "encoding", None)
+
+    @property
+    def errors(self):
+        redirected, target = self._redirect()
+        stream = target if redirected and target is not None else self._real
+        return getattr(stream, "errors", None)
+
+    @property
+    def newlines(self):
+        redirected, target = self._redirect()
+        stream = target if redirected and target is not None else self._real
+        return getattr(stream, "newlines", None)
 
     @property
     def buffer(self):

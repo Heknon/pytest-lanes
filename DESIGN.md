@@ -154,6 +154,16 @@ An independent adversarial review of round 4, and a chaos suite on 3.14t (48 lan
 
 Not a lanes defect: concurrent `config.cache` get/set across processes loses values under plain xdist too (6–9 of 300 with `-n 4`); an upstream candidate.
 
+**Cycle 2** (a second independent review of the fixes above, a soak run and a scale run):
+
+13. **Memory leak on pytest 9.** pytest 9 makes a FixtureDef for `request` on every test; P2 kept per-lane fixture state in a dict keyed by FixtureDef, so each lived for the whole run with what it held (3,235 FixtureDefs alive after 400 tests; about 7 KB per test in a 4,000-test soak). Per-lane state is now keyed weakly (probed: FixtureDef must stay weakly referenceable). Memory now grows as plain pytest's and a plain xdist worker's (both keep their reports).
+14. **The lane-error check dropped the event it had just dequeued** (fix 5 above): an unacknowledged "item done" stranded its lane again, and in hybrid mode a finished test was reported crashed. Lane errors are now checked only between events, and after Ctrl-C the queue is drained as the pump would (finished items still reach the scheduler).
+15. **The patch-guard exemption for pytest's own patches covered pytester**, which changes the cwd and environment for the process. Only `_pytest.unittest` (twisted support) is exempt.
+16. **A module- or session-scoped fixture set up by an exclusive test kept its patch** for the lane's next, non-exclusive tests in hybrid mode. Broader-scoped fixture patches are guarded even in exclusive tests (not in the single-process serial phase, which runs alone). Classes made by a factory and held by a module are shared, not local.
+17. **`sys.stdout` was not a faithful stream**: `io.TextIOBase` defines `encoding`, `errors`, `closed`, `close`, `seek`, `tell`, `truncate`, `writelines`, `readable`, `seekable`, so they never reached the real stream or the redirect target. Under lanes `sys.stdout.encoding` was None (xdist: 'utf-8'), `seek()` inside `redirect_stdout(StringIO())` raised, and `close()` there closed stdout for every lane. Each is now delegated; outside a redirect `close()` does nothing (the stream is every lane's).
+
+Scale: 2,000 half-second tests ran in 7.9s on 500 lanes (88 MB) and 4.9s as 4 × 125, all passed.
+
 ### Silent corruption is made loud
 
 A race that crashes is found. The dangerous kind would leave a run green while a report, an output or a fixture value belonged to another test. Two defences:

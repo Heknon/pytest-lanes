@@ -29,6 +29,8 @@ def _p2_fixture_caches(config):
         problems.append("P2 FixtureDef.cached_result/_finalizers")
     if getattr(FixtureDef, "__slots__", None):
         problems.append("P2 FixtureDef now uses __slots__")
+    if not hasattr(FixtureDef, "__weakref__"):
+        problems.append("P2 FixtureDef instances can no longer be weakly referenced")
     return "\n  ".join(problems) or None
 
 

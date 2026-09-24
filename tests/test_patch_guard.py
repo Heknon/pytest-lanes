@@ -230,3 +230,54 @@ def test_pytest_s_own_patches_are_not_guarded(pytester, monkeypatch):
             pass
     """)
     run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=4)
+
+
+def test_pytester_is_guarded(pytester):
+    # pytester changes the cwd and environment for the process: exempting all of pytest
+    # (for its twisted support) let it do that under other lanes (round-5 cycle-2 review).
+    pytester.makeconftest('pytest_plugins = ["pytester"]')
+    pytester.makepyfile("""
+        def test_uses_pytester(pytester):
+            pass
+    """)
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.stdout.fnmatch_lines([GUARD_MESSAGE])
+
+
+def test_higher_scoped_fixture_patch_is_guarded_in_an_exclusive_test(pytester):
+    # A module fixture set up by an exclusive test keeps its patch for the module's later,
+    # non-exclusive tests while other lanes run (hybrid runs exclusive tests inline).
+    pytester.makepyfile(test_m1="""
+        import os, time, pytest
+        @pytest.fixture(scope="module")
+        def env():
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv("LANES_LEAK", "1")
+                yield
+        @pytest.mark.lanes_exclusive
+        def test_1(env):
+            pass
+        def test_2(env):
+            time.sleep(0.5)
+    """)
+    r = run(pytester, "-n", "1", "--lanes", "2", "--dist", "loadscope", timeout=60)
+    r.stdout.fnmatch_lines(["*module-scoped fixture*"])
+
+
+def test_factory_made_module_class_is_shared(pytester):
+    pytester.makepyfile(appcls="""
+        def _make():
+            class Settings:
+                timeout = 1
+            return Settings
+        Settings = _make()
+    """)
+    pytester.makepyfile("""
+        from unittest import mock
+        import appcls
+        def test_it():
+            with mock.patch.object(appcls.Settings, "timeout", 2):
+                pass
+    """)
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.stdout.fnmatch_lines([GUARD_MESSAGE])

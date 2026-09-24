@@ -20,6 +20,7 @@ import os
 import platform
 import queue
 import sys
+import weakref
 from types import SimpleNamespace
 
 LANE: contextvars.ContextVar = contextvars.ContextVar("pytest_lanes.lane", default=None)
@@ -58,7 +59,10 @@ class ThreadNode:
 
         # Execution-facing: what a worker process would own.
         self.setupstate = setupstate
-        self.fixture_state: dict = {}
+        # Per-lane FixtureDef state (isolation.py, P2), keyed weakly: pytest 9 makes a
+        # FixtureDef per test (for `request`), and strong keys kept every one alive.
+        self.fixture_state = weakref.WeakKeyDictionary()   # FixtureDef -> [cached_result, finalizers]
+        self.fixture_attrs = weakref.WeakKeyDictionary()   # FixtureDef -> {attr: value}
         self.fixture_scopes: list = []  # scopes of the fixtures being set up now (patch guard)
         self.out = io.StringIO()
         self.err = io.StringIO()

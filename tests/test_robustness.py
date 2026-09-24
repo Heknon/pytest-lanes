@@ -439,3 +439,64 @@ def test_keyboard_interrupt_raised_by_a_test_stops_the_run(pytester):
     r = run(pytester, "--lanes", "2", timeout=60)
     assert r.ret == pytest.ExitCode.INTERRUPTED, r.stdout.str()
     assert r.parseoutcomes().get("passed", 0) <= 2, r.stdout.str()
+
+
+# ---------------------------------------------------------------- memory (round 5, cycle 2)
+@pytest.mark.parametrize("mode", [["--lanes", "4"], ["-n", "1", "--lanes", "4"]], ids=["lanes", "hybrid"])
+def test_fixture_definitions_do_not_accumulate(pytester, monkeypatch, mode):
+    # pytest 9 makes a FixtureDef for `request` per test. Lanes kept per-lane fixture state
+    # in a dict keyed by FixtureDef, so each of them (and what its cache held) lived for
+    # the whole run: about 7 KB per test (soak run, 4,000 tests).
+    monkeypatch.setenv("LANES_OUT", str(pytester.path))
+    pytester.makeconftest("""
+        import gc, os, pathlib
+        from _pytest.fixtures import FixtureDef
+        def pytest_sessionfinish(session):
+            if not hasattr(session.config, "workerinput") or "." not in str(session.config.workerinput.get("workerid", "")):
+                gc.collect()
+                live = sum(isinstance(o, FixtureDef) for o in gc.get_objects())
+                (pathlib.Path(os.environ["LANES_OUT"]) / f"live-{os.getpid()}").write_text(str(live))
+    """)
+    pytester.makepyfile("""
+        import pytest
+        @pytest.fixture
+        def fx(request):
+            return request.param if hasattr(request, "param") else 1
+        @pytest.mark.parametrize("i", range(400))
+        def test_t(i, fx, request, tmp_path):
+            pass
+    """)
+    run(pytester, *mode, timeout=120).assert_outcomes(passed=400)
+    counts = [int(p.read_text()) for p in pytester.path.glob("live-*")]
+    assert counts and max(counts) < 100, counts
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "1", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_keyboard_interrupt_with_a_slow_reporter(pytester, mode):
+    # The lane-error check ran right after an event was dequeued and threw it away: a lost
+    # "item done" left its lane waiting (grace period, no teardown), and in hybrid mode a
+    # test was reported both passed and crashed (round-5 cycle-2 review).
+    import time
+    pytester.makeini("[pytest]\nlanes_interrupt_grace = 5\n")
+    pytester.makeconftest("""
+        import time
+        def pytest_runtest_logfinish(nodeid, location):
+            if nodeid.endswith("test_b"):
+                time.sleep(1.0)
+    """)
+    pytester.makepyfile("""
+        import time
+        def test_a():
+            time.sleep(0.3)
+            raise KeyboardInterrupt
+        def test_b():
+            pass
+    """)
+    started = time.monotonic()
+    r = run(pytester, *mode, timeout=60)
+    assert time.monotonic() - started < 4.5, r.stdout.str()
+    assert r.ret == pytest.ExitCode.INTERRUPTED, r.stdout.str()
+    out = r.stdout.str()
+    assert "did not stop" not in out, out
+    # xdist reports the test that raised it as a crashed worker; no other test may be.
+    assert not any("crashed" in line and "test_b" in line for line in out.splitlines()), out

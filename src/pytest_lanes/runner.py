@@ -72,6 +72,7 @@ class LaneRunner:
         self.teardown_errors: list = []            # (lane id, error) from teardown after a stop
         self.exclusive_lock = ReadWriteLock()
         self.interrupting = False                  # Ctrl-C: _interrupt is stopping the lanes
+        self._pump_state = ({}, None, None, [], None, None)   # set by _pump_events
         self.ledger = Ledger()                     # run-time integrity check (integrity.py)
         self.nodes: list = []                      # every lane of this process, as created
         self._session_stack = contextlib.ExitStack()
@@ -247,6 +248,9 @@ class LaneRunner:
         # calls are held, in order, and replayed once it is done, as xdist's controller
         # prints a worker's reports in another process.
         held: dict = {}
+        # For _interrupt, which drains the queue after Ctrl-C: a finished item must still
+        # be reported to the scheduler (or, in hybrid mode, the controller calls it crashed).
+        self._pump_state = (held, sched, session, nodes, on_done, before_replay)
         while True:
             try:
                 event = self.events.get(timeout=0.05)
@@ -255,7 +259,8 @@ class LaneRunner:
                 if not any(t.is_alive() for t in threads) and self.events.empty():
                     break
                 continue
-            self._check_lane_errors(nodes)
+            # Lane errors are checked only after an event is handled: an event taken off
+            # the queue and then dropped (an unacknowledged ItemDone) stranded its lane.
             if isinstance(event, HookCall):
                 node = by_id.get(event.lane)
                 item = node.current_item if node is not None else None
@@ -263,11 +268,13 @@ class LaneRunner:
                     held.setdefault(event.lane, []).append(event)
                 else:
                     self._replay(event, before_replay)
+                self._check_lane_errors(nodes)
                 continue
             try:
                 self._item_done(event, held, sched, session, nodes, on_done, before_replay)
             finally:                              # even on Ctrl-C: the lane waits for this
                 event.ack.set()
+            self._check_lane_errors(nodes)
 
     def _check_lane_errors(self, nodes) -> None:
         """A lane died: stop the others now, as xdist's controller does on a worker error.
@@ -323,10 +330,7 @@ class LaneRunner:
                     event = self.events.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                if isinstance(event, HookCall):
-                    self.hooks.replay(event)    # reports of tests that did finish
-                else:
-                    event.ack.set()
+                self._drain(event)             # reports of tests that did finish
         except KeyboardInterrupt:
             pass
         left = [(n.gateway.id, n.current_item) for t, n in running.items() if t.is_alive()]
@@ -334,6 +338,20 @@ class LaneRunner:
             test = item.nodeid if item is not None else "between tests"
             self._say(f"lane {lane_id} did not stop: {test} was left without teardown "
                       f"(blocked in a call that cannot be interrupted)")
+
+    def _drain(self, event) -> None:
+        """Handle one event after Ctrl-C, as the pump would; never leave a lane waiting."""
+        held, sched, session, nodes, on_done, before_replay = self._pump_state
+        if isinstance(event, HookCall):
+            if event.lane in held:
+                held[event.lane].append(event)
+            else:
+                self._replay(event, before_replay)
+            return
+        try:
+            self._item_done(event, held, sched, session, nodes, on_done, before_replay)
+        finally:
+            event.ack.set()
 
     def _say(self, line: str) -> None:
         tr = self.config.pluginmanager.get_plugin("terminalreporter")
