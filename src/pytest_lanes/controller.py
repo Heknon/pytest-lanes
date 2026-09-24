@@ -17,6 +17,8 @@ attributes that ``LaneProxy`` mirrors).
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -134,10 +136,40 @@ class LaneMux:
         return getattr(self.inner, name)
 
 
+#: Interpreter flags lanes depend on, with the environment variable that sets each one
+#: in a new interpreter. xdist starts its workers without the controller's -X options.
+PROPAGATED_FLAGS = (("context_aware_warnings", "PYTHON_CONTEXT_AWARE_WARNINGS"),
+                    ("thread_inherit_context", "PYTHON_THREAD_INHERIT_CONTEXT"))
+
+
+def propagate_interpreter_flags() -> dict:
+    """Set the environment so xdist's workers get the controller's flags.
+
+    Returns the previous values, for ``restore_environment``. Without this,
+    ``python -X context_aware_warnings=1 -m pytest -n 2 --lanes 4`` had every
+    worker refuse to run: the flag reached the controller only.
+    """
+    previous = {}
+    for flag, variable in PROPAGATED_FLAGS:
+        if getattr(sys.flags, flag, False):
+            previous[variable] = os.environ.get(variable)
+            os.environ[variable] = "1"
+    return previous
+
+
+def restore_environment(previous: dict) -> None:
+    for variable, value in previous.items():
+        if value is None:
+            os.environ.pop(variable, None)
+        else:
+            os.environ[variable] = value
+
+
 class LanesController:
     """Plugin registered on the hybrid controller: wraps the scheduler in a LaneMux.
 
-    It also makes a worker's INTERNALERROR fail the run. xdist's controller prints
+    It passes the controller's interpreter flags to the workers
+    (``propagate_interpreter_flags``), and makes a worker's INTERNALERROR fail the run. xdist's controller prints
     it (via ``pytest_internalerror``) and carries on, and the run can still exit 0
     (xdist 3.8.0). A worker's lanes report a failed integrity check that way
     (integrity.py), and such a run must not look green.
@@ -146,6 +178,10 @@ class LanesController:
     def __init__(self, config) -> None:
         self.m = config.getoption("lanes")
         self.internal_error = False
+        self._environment = propagate_interpreter_flags()
+
+    def pytest_unconfigure(self, config):
+        restore_environment(self._environment)
 
     def pytest_internalerror(self, excrepr, excinfo):
         self.internal_error = True

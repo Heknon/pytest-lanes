@@ -8,6 +8,13 @@ and capture per lane instead:
   runner turns those buffers into report sections after each phase, as pytest's
   CaptureManager would. With ``-s``/``--capture=no`` they are not installed, and
   output goes straight to the terminal, as under xdist.
+* ``contextlib.redirect_stdout``/``redirect_stderr`` entered on a lane redirect that
+  lane's output only (P13): the target goes on the lane's own stack, which its
+  ``_LaneStream`` writes to, instead of replacing ``sys.stdout`` for every lane.
+  Swapping it for the process captured every other lane's prints too.
+* ``sys.stdin`` becomes ``_NoStdin``, which fails a read at once, as pytest's
+  capture does. Without it, a lane reading stdin blocked on the terminal forever.
+  Left alone with ``-s``, as by pytest.
 * The logging plugin's ``caplog_handler`` and ``report_handler`` become
   ``_LogDispatch`` stand-ins that forward to the current lane's own copies.
   A permanent ``_LogRouter`` on the root logger does the actual emitting, so
@@ -40,9 +47,15 @@ class _LaneStream(io.TextIOBase):
         lane = LANE.get()
         if lane is None:
             return self._real.write(s)
+        redirects = lane.redirects[self._attr]
+        if redirects:
+            return redirects[-1].write(s)
         return getattr(lane, self._attr).write(s)
 
     def flush(self):
+        lane = LANE.get()
+        if lane is not None and lane.redirects[self._attr]:
+            return lane.redirects[self._attr][-1].flush()
         self._real.flush()
 
     @property
@@ -64,6 +77,13 @@ class _LaneBinaryStream:
         if lane is None:
             return self._text._real.buffer.write(b)
         encoding = getattr(self._text._real, "encoding", None) or "utf-8"
+        redirects = lane.redirects[self._text._attr]
+        if redirects:
+            target = redirects[-1]
+            if hasattr(target, "buffer"):
+                return target.buffer.write(b)
+            target.write(bytes(b).decode(getattr(target, "encoding", None) or encoding, "replace"))
+            return len(b)
         getattr(lane, self._text._attr).write(bytes(b).decode(encoding, "replace"))
         return len(b)
 
@@ -74,15 +94,102 @@ class _LaneBinaryStream:
         return getattr(self._text._real.buffer, name)
 
 
+class _NoStdin(io.TextIOBase):
+    """sys.stdin while capturing: reads fail, with pytest's own message."""
+
+    encoding = "utf-8"
+    MESSAGE = "pytest: reading from stdin while output is captured!  Consider using `-s`."
+
+    def read(self, size=-1):
+        raise OSError(self.MESSAGE)
+
+    readline = read
+
+    def readlines(self, hint=-1):
+        raise OSError(self.MESSAGE)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise OSError(self.MESSAGE)
+
+    def fileno(self):
+        raise io.UnsupportedOperation("redirected stdin is pseudofile, has no fileno()")
+
+    def isatty(self):
+        return False
+
+    def readable(self):
+        return False
+
+    def close(self):
+        pass
+
+    @property
+    def buffer(self):
+        return self
+
+
+# ------------------------------------------------------------------ P13: redirect_stdout
+_REDIRECTED = {"stdout": "out", "stderr": "err"}
+
+
+def check_p13():
+    """Probe: contextlib's redirect classes still look as ``per_lane_redirects`` expects."""
+    base = getattr(contextlib, "_RedirectStream", None)
+    if base is None or not {"__enter__", "__exit__"} <= set(vars(base)):
+        return "P13 contextlib._RedirectStream.__enter__/__exit__"
+    if (getattr(contextlib.redirect_stdout, "_stream", None), getattr(contextlib.redirect_stderr, "_stream", None)) \
+            != ("stdout", "stderr"):
+        return "P13 contextlib.redirect_stdout/redirect_stderr._stream"
+    probe = contextlib.redirect_stdout(None)
+    if not hasattr(probe, "_new_target"):
+        return "P13 contextlib.redirect_stdout()._new_target"
+    return None
+
+
 @contextlib.contextmanager
-def per_lane_std_streams():
-    real_out, real_err = sys.stdout, sys.stderr
-    sys.stdout = _LaneStream(real_out, "out")
-    sys.stderr = _LaneStream(real_err, "err")
+def per_lane_redirects():
+    """P13: redirect_stdout/redirect_stderr on a lane redirect that lane only."""
+    base = contextlib._RedirectStream
+    enter, exit_ = base.__dict__["__enter__"], base.__dict__["__exit__"]
+
+    def __enter__(self):
+        lane = LANE.get()
+        attr = _REDIRECTED.get(self._stream)
+        per_lane = lane is not None and attr is not None and isinstance(getattr(sys, self._stream), _LaneStream)
+        self.__dict__.setdefault("_lanes_entered", []).append(lane if per_lane else None)
+        if not per_lane:
+            return enter(self)
+        lane.redirects[attr].append(self._new_target)
+        return self._new_target
+
+    def __exit__(self, *exc):
+        lane = self.__dict__["_lanes_entered"].pop()
+        if lane is None:
+            return exit_(self, *exc)
+        lane.redirects[_REDIRECTED[self._stream]].pop()
+        return None
+
+    base.__enter__, base.__exit__ = __enter__, __exit__
     try:
         yield
     finally:
-        sys.stdout, sys.stderr = real_out, real_err
+        base.__enter__, base.__exit__ = enter, exit_
+
+
+@contextlib.contextmanager
+def per_lane_std_streams():
+    real_in, real_out, real_err = sys.stdin, sys.stdout, sys.stderr
+    sys.stdin = _NoStdin()
+    sys.stdout = _LaneStream(real_out, "out")
+    sys.stderr = _LaneStream(real_err, "err")
+    try:
+        with per_lane_redirects():
+            yield
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = real_in, real_out, real_err
 
 
 # ------------------------------------------------------------------ logging (P3)

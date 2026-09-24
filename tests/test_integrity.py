@@ -197,3 +197,51 @@ def test_canary_suite_under_switching_pressure(pytester, name):
 
     _, xdist_rows = report_log(pytester, *CANARY_MODES["xdist"], timeout=300)
     assert rows == xdist_rows
+
+
+# ---------------------------------------------------------------- stdio replaced while lanes run (round 4)
+SWAPPER = """
+import io, sys, time, pytest
+{mark}
+def test_swap():
+    real = sys.stdout
+    sys.stdout = io.StringIO()        # what click's CliRunner does, for the whole process
+    try:
+        time.sleep(0.3)
+    finally:
+        sys.stdout = real
+@pytest.mark.parametrize("i", range(3))
+def test_printer(i):
+    for _ in range(60):
+        print(f"other-{{i}}"); time.sleep(0.005)
+"""
+
+
+@pytest.mark.parametrize("name", LANE_MODES)
+def test_replacing_sys_stdout_while_lanes_run_fails_the_run(pytester, name):
+    # Other lanes' output went into the replacement, silently. Now the run fails and says why.
+    pytester.makepyfile(test_x=SWAPPER.format(mark=""))
+    r = run(pytester, *LANE_MODES[name], timeout=60)
+    assert_integrity_failure(r, "sys.stdout was replaced", "lanes_exclusive")
+
+
+@pytest.mark.parametrize("name", LANE_MODES)
+def test_replacing_sys_stdout_in_an_exclusive_test_is_fine(pytester, name):
+    pytester.makepyfile(test_x=SWAPPER.format(mark="@pytest.mark.lanes_exclusive"))
+    r = run(pytester, *LANE_MODES[name], timeout=60)
+    assert "integrity check failed" not in r.stdout.str() + r.stderr.str()
+    r.assert_outcomes(passed=4)
+
+
+def test_capsys_and_no_capture_raise_no_stdio_alarm(pytester):
+    pytester.makepyfile(test_x="""
+        import time, pytest
+        def test_capsys(capsys):
+            print("x"); assert capsys.readouterr().out == "x\\n"
+        @pytest.mark.parametrize("i", range(4))
+        def test_t(i): time.sleep(0.1)
+    """)
+    for extra in ([], ["-s"]):
+        r = run(pytester, "--lanes", "3", *extra, timeout=60)
+        assert "integrity check failed" not in r.stdout.str() + r.stderr.str(), extra
+        r.assert_outcomes(passed=5)

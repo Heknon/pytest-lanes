@@ -43,16 +43,16 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 |---|---|---|
 | `plugin.py` | Entry point: options, and `pytest_configure` choosing the mode. No logic (pytest registers it as a plugin, so any `pytest_*` name here is a hook) | |
 | `lane.py` | `ThreadNode`, one lane: an xdist WorkerController look-alike that also owns its private SetupState, fixture caches, output buffers and log handlers. The `LANE` contextvar | |
-| `runner.py` | `LaneRunner`, the base of both test-running sessions: session-long install/uninstall, per-phase capture, the lane loop (`_node_loop`, a copy of xdist's `WorkerInteractor` loop), the main-thread pump (`_pump`), and `ReadWriteLock` for exclusive tests | P9 |
+| `runner.py` | `LaneRunner`, the base of both test-running sessions: session-long install/uninstall, per-phase capture, the lane loop (`_node_loop`, a copy of xdist's `WorkerInteractor` loop), the main-thread pump (`_pump`), Ctrl-C handling (`_interrupt`: `KeyboardInterrupt` raised in each lane via the C API `PyThreadState_SetAsyncExc`, teardown on the lane, `lanes_interrupt_grace`), and `ReadWriteLock` for exclusive tests | P9 |
 | `single.py` | `SingleProcessSession` (`--lanes N`): plays xdist's DSession on the main thread, then runs exclusive tests on `ln-serial` | |
 | `worker.py` | `HybridWorkerSession` (a worker of `-n P --lanes M`): takes over xdist's worker loop and channel | X2 |
-| `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler | X3, X4 |
+| `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler. Passes the controller's `-X context_aware_warnings`/`thread_inherit_context` to the workers through the environment (xdist starts workers without `-X` options) | X3, X4 |
 | `scheduling.py` | `make_scheduler` (via xdist's own factory hook), the scheduler protocol check, the loadgroup `@group` suffix | X1, P5 |
-| `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7, P10, P11 |
-| `capture.py` | Per-lane stdout/stderr and logging; logging's logger registry made safe to iterate | P3, P8 |
+| `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7, P10, P11, P12 |
+| `capture.py` | Per-lane stdout/stderr and logging; per-lane `contextlib.redirect_stdout`/`redirect_stderr`; `sys.stdin` that fails a read as pytest's capture does; logging's logger registry made safe to iterate | P3, P8, P13 |
 | `hookrouting.py` | `ControllerHookRouter`: the 4 controller hooks queued on lanes and replayed on the main thread | P4 |
 | `compat.py` | Shims for third-party plugins that assume one test at a time per process | C1 |
-| `integrity.py` | `Ledger`: the run-time integrity check. Each lane's routed hooks name the item it runs, replayed streams nest (logstart, reports, logfinish), each done item was logged, and (single process) every collected item ran as often as collected | |
+| `integrity.py` | `Ledger`: the run-time integrity check. Each lane's routed hooks name the item it runs, replayed streams nest (logstart, reports, logfinish), each done item was logged, and (single process) every collected item ran as often as collected. `StdioWatch`: `sys.stdout`/`stderr`/`stdin` replaced while two or more lanes run tests (click's `CliRunner`) fails the run | |
 | `probes.py` | Fail-closed startup checks, one function per touchpoint | all except P1, P5 |
 | `detector/` | `--lanes-detect`, an isolated debugging tool, not used by lanes at run time: which tests change process-wide state. `walk.py` (read-only recursive snapshot), `sources.py` (process state, modules under the rootdir, plugin objects), `recorder.py` (live patch recording), `classify.py` (per-test / patched / grows / set-once), `report.py`, `plugin.py`. Only `SharedStateDetector` and `refuse_concurrent` are imported outside it | D1 |
 
@@ -63,7 +63,7 @@ Mode selection in `pytest_configure`:
 
 Other files:
 
-- `tests/` is the spec: pytester subprocess tests (about 120) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes), `test_isolation.py` (output, logging, basetemp, worker identity, warnings) and `test_integrity.py` (the integrity check, and a canary suite under maximum thread-switching pressure). Shared helpers live in `tests/lanes_testing.py`.
+- `tests/` is the spec: pytester subprocess tests (about 150) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes), `test_isolation.py` (output, logging, basetemp, worker identity, warnings) and `test_integrity.py` (the integrity check, and a canary suite under maximum thread-switching pressure). Shared helpers live in `tests/lanes_testing.py`.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is a draft CI workflow, manual-only (`workflow_dispatch`): GitHub runners are paid.
@@ -75,7 +75,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | # | Touchpoint | Purpose |
 |---|---|---|
 | P1 | `session._setupstate` | Router giving each lane its own `SetupState` |
-| P2 | `FixtureDef.cached_result` / `._finalizers` | Class-level properties keyed per lane |
+| P2 | `FixtureDef.cached_result` / `._finalizers` / `.cached_param` | Class-level properties keyed per lane. `cached_param` is set and deleted by pytest's setuponly plugin (`--setup-show`/`--setup-only`); shared, one lane deleted it while another printed it (AttributeError, 3 of 5 runs on 3.14t) |
 | P3 | `LoggingPlugin.caplog_handler` / `.report_handler` | Per-lane dispatch; a permanent root `_LogRouter` makes pytest's concurrent handler attach/detach harmless |
 | P4 | pluggy `PluginManager._inner_hookexec` | Routes the 4 controller hooks to the main thread (the same slot pluggy's public `add_hookcall_monitoring` uses) |
 | P5 | `item._nodeid` | `@group` suffix under loadgroup, identical to xdist's worker |
@@ -85,18 +85,20 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | P9 | `_pytest.doctest.DoctestItem` | Doctest items run exclusively: doctest's runner swaps `sys.stdout` for the whole process, which captured other lanes' output and failed the doctest |
 | P10 | `config.__class__` (a subclass with per-lane `workerinput`/`workeroutput` properties) | Each lane is its own xdist worker: `worker_id`, `testrun_uid`, `xdist.get_xdist_worker_id()` and `config.workerinput` name the lane (`ln3`, or `gw0.ln3` in hybrid, counting every lane of the run). The single-process main thread keeps the controller role (no `workerinput`). Probed: Config has no `__slots__`, and xdist still reads `config.workerinput` |
 | P11 | `_pytest.recwarn.WarningsRecorder.__enter__` | Without context-aware warnings (Python < 3.14), `pytest.warns`/`deprecated_call`/`recwarn` swap process-wide warning state (5 of 6 concurrent blocks failed). A non-exclusive test entering one fails with instructions to mark it `lanes_exclusive`. Not installed when warnings are context-aware |
+| P12 | `_pytest.cacheprovider.Cache.get` / `.set` | Serialized by one process-wide lock: pytest writes a value by truncating the file and then writing it, so a lane reading concurrently got the default (45 of 200 get-after-set tests failed) |
+| P13 | stdlib `contextlib._RedirectStream.__enter__` / `__exit__` (`._stream`, `._new_target`) | `redirect_stdout`/`redirect_stderr` entered on a lane push the target on that lane's own stack instead of replacing `sys.stdout` for the process, which captured every other lane's prints (4 of 4 redirecting tests failed). Only while lanes capture (not with `-s`) |
 | C1 | pytest-rerunfailures ≥ 15: `config.failures_db` (`ClientStatusDB`) | A hybrid worker's lanes shared its one socket to the controller; interleaved request/response pairs killed a lane with `ValueError`. Its socket methods (`_get`, `_set`, `increment_suite_reruns`) are serialized |
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
 | X4 | hybrid controller: `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Mirrored on each `LaneProxy`, so a custom scheduler or plugin reading them sees a worker (`workerinput` gets the lane's id and the total lane count). Probed by checking the xdist code that sets them |
-| D1 | `--lanes-detect` only: stdlib `unittest.mock._patch.__enter__` (and `.getter`/`.attribute`), `_patch_dict._patch_dict` / `._unpatch_dict` | Records patches applied inside a test body, which no snapshot sees. Probed by `detector.recorder.check_d1` (a UsageError for `--lanes-detect` if it fails); never installed in a lanes run |
+| D1 | `--lanes-detect` only: stdlib `unittest.mock._patch.__enter__` (and `.getter`/`.attribute`), `_patch_dict._patch_dict` / `._unpatch_dict`; `contextlib._RedirectStream` (to tell redirects from stdio swaps) | Records patches applied inside a test body, which no snapshot sees. Probed by `detector.recorder.check_d1` (a UsageError for `--lanes-detect` if it fails); never installed in a lanes run |
 
 ## How to run
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
-.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~120 tests, ~40s
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~150 tests, ~50s
 scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
@@ -111,6 +113,7 @@ Required flags and environment:
 
 ## Verified status
 
+- **Round 4 (plugins, OS behaviour, silent failures):** a harness ran 55 scenarios under plain, `-n`, `--lanes` and hybrid (pytest-cov, asyncio, mock, repeat, check, order, dependency, randomly, timeout, env; fork, spawn, stdin, `sys.exit`, recursion, thread exceptions, cache, stepwise, live logging, unittest, subtests, Ctrl-C). Seven bugs fixed test-first (DESIGN.md "Found and fixed in round 4"). Suite green on 3.12 (pytest 8.0.2, 9.1.1) and 3.14t (8.3.5, 9.1.1).
 - **Round 3 (edge-case sweep, 4-core container):** all tests pass on the full local matrix: CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1 and 9.1.1 / 3.8.0. The only skips are the two 3.14-only warnings tests on 3.12/3.13. Twelve bugs and four policy gaps were fixed, each test-first (DESIGN.md "Found and fixed in round 3"). The instrumentation plugin's smoke run has identical report-log output in all three modes.
 - **Round 2 (4-core container, uv):** all 18 tests pass (the 3.14 warnings test skips on 3.12/3.13) on CPython 3.12.3, 3.13.12, 3.14.7 and 3.14.7t, each with pytest 8.0.2 / xdist 3.6.1, pytest 8.3.5 / xdist 3.6.1 and pytest 9.1.1 / xdist 3.8.0.
   - The 15 original tests did **not** pass reliably on 4 cores: the P7 basetemp race failed the hybrid tests in roughly half of all runs on every version, and the P6 `pop` race failed 2–5 tests per run on 3.14t. Both are fixed, with contract tests.
@@ -132,7 +135,8 @@ These are not bugs to "fix" by weakening the invariants.
 - **Crash collateral:** every in-flight test in a crashed process is reported as crashed.
 - **Exclusive tests pause their whole process.**
 - **Unsupported:** `each` and `worksteal` modes, and `--pdb`.
-- **Ctrl-C** doesn't interrupt running tests.
+- **Ctrl-C** interrupts every lane and runs its teardown, as pytest does; a lane blocked in one long C call (a sleep, a socket read without timeout) is abandoned after `lanes_interrupt_grace` (30s) and named. SIGTERM kills the process without teardown, in every mode.
+- **Process-wide setters and stdio swaps:** `random.seed`, `socket.setdefaulttimeout`, `locale.setlocale`, `os.umask` etc. are shared by all lanes (`--lanes-detect` reports them); replacing `sys.stdout` (click's `CliRunner`) fails the run unless the test is `lanes_exclusive`. `contextlib.redirect_stdout` is per lane.
 - **Wall-clock assertions** (`r.duration < N`) in `tests/` are load-sensitive (backlog item 2). The earlier unreproduced flake was most likely the P7 basetemp race, which a 1-core box rarely hits.
 - **Round-3 findings still open (DESIGN.md F11–F16):**
   - `warnings.catch_warnings` used directly (not via pytest.warns) on Python ≤ 3.13;
@@ -173,7 +177,7 @@ These are not bugs to "fix" by weakening the invariants.
 9. **CI.** Make `.github/workflows/ci.yml` actually run, including the nightly job against pytest and xdist `main`. If the user's environment is air-gapped, adapt `scripts/matrix.sh` to a local package index instead.
 10. **Upstream.** Draft two issues:
     - pytest: `PYTEST_CURRENT_TEST` should use `pop(..., None)`, plus a public API for per-context SetupState and fixture caches, to remove P1, P2 and P6.
-    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X4. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers. And that a worker's INTERNALERROR is printed by the controller but the run can still exit 0 (verified on xdist 3.8.0: "3 passed", exit 0).
+    - xdist: document the node protocol and add a lane-capable worker hook, to remove X1–X4. Also report that loadgroup silently ignores `xdist_group` marks added by a non-`tryfirst` `collection_modifyitems`: verified with 3 workers, where one group's tests landed on 3 different workers. And that a worker's INTERNALERROR is printed by the controller but the run can still exit 0 (verified on xdist 3.8.0: "3 passed", exit 0), and that workers do not inherit the controller's `-X` options (`context_aware_warnings`), only environment variables.
 
 ## Working rules
 

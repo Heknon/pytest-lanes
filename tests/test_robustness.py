@@ -4,10 +4,11 @@
 xdist would not also raise, and the same exit code as plain xdist.
 """
 import inspect
+import sys
 
 import _pytest.runner
 import pytest
-from lanes_testing import MODES, run
+from lanes_testing import BASE, MODES, run
 
 #: pytest >= 8.1 tears a test down fully once the session is stopping (-x). Older
 #: runners leave session fixtures to the end of the session, even without xdist.
@@ -283,3 +284,97 @@ def test_faulthandler_timeout_is_refused(pytester, mode):
     r = run(pytester, *mode, timeout=60)
     assert r.ret == pytest.ExitCode.USAGE_ERROR
     r.stderr.fnmatch_lines(["*faulthandler_timeout*"])
+
+
+# ---------------------------------------------------------------- hybrid: interpreter flags (round 4)
+WARNINGS_ON = [a for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:warnings") for a in pair]
+
+
+@pytest.mark.skipif(bool(getattr(sys.flags, "context_aware_warnings", False)),
+                    reason="warnings are context-aware here, so nothing is refused")
+def test_hybrid_refuses_up_front_when_its_workers_would(pytester, monkeypatch):
+    # Every worker refused (warnings plugin on, not context-aware), each with a traceback,
+    # and the run ended "no tests ran" (exit 5). The controller now refuses first (exit 4).
+    monkeypatch.delenv("PYTHON_CONTEXT_AWARE_WARNINGS", raising=False)
+    pytester.makepyfile("def test_t(): pass\n")
+    r = pytester.runpytest_subprocess(*WARNINGS_ON, "-n", "2", "--lanes", "2", timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str() + r.stderr.str()
+    r.stderr.fnmatch_lines(["*pytest-lanes refuses to run*", "*warnings plugin active*"])
+    assert "Traceback" not in r.stdout.str() + r.stderr.str()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="context-aware warnings need Python 3.14")
+def test_context_aware_warnings_flag_reaches_hybrid_workers(pytester, monkeypatch):
+    # -X context_aware_warnings=1 applies to the controller only: xdist starts its workers
+    # without it, so every worker refused. The controller passes it on through the environment.
+    monkeypatch.delenv("PYTHON_CONTEXT_AWARE_WARNINGS", raising=False)
+    pytester.makepyfile("""
+        import warnings
+        def test_w():
+            warnings.warn("w", UserWarning)
+    """)
+    r = pytester.run(sys.executable, "-X", "context_aware_warnings=1", "-m", "pytest", *WARNINGS_ON,
+                     "-n", "1", "--lanes", "2", timeout=60)
+    assert r.ret == 0, r.stdout.str() + r.stderr.str()
+    r.stdout.fnmatch_lines(["*1 passed, 1 warning*"])
+
+
+# ---------------------------------------------------------------- Ctrl-C (round 4)
+INTERRUPTED_TESTS = """
+import os, pathlib, time, pytest
+OUT = pathlib.Path(os.environ["LANES_OUT"])
+@pytest.fixture
+def env(request):
+    yield
+    (OUT / f"teardown-{{request.node.name}}").write_text("released")
+@pytest.fixture(scope="session")
+def session_env(worker_id):
+    yield
+    (OUT / f"session-teardown-{{worker_id}}").write_text("released")
+@pytest.mark.parametrize("i", range(4))
+def test_long(i, env, session_env):
+    (OUT / f"started-{{i}}").write_text("")
+    {body}
+"""
+
+
+def interrupt(pytester, mode, body, *, ini="", wait_started=4, timeout=60):
+    """Start a run, press Ctrl-C (SIGINT to the process group) once the tests run."""
+    import os
+    import signal
+    import subprocess
+    import time
+    pytester.makepyfile(INTERRUPTED_TESTS.format(body=body))
+    if ini:
+        pytester.makeini(ini)
+    env = {**os.environ, "LANES_OUT": str(pytester.path)}
+    p = subprocess.Popen([sys.executable, "-m", "pytest", *BASE, *mode], cwd=pytester.path, env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    deadline = time.monotonic() + 30
+    while len(list(pytester.path.glob("started-*"))) < wait_started and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)
+    started = time.monotonic()
+    os.killpg(p.pid, signal.SIGINT)
+    out, _ = p.communicate(timeout=timeout)
+    return p.returncode, out, time.monotonic() - started
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "4"], ["-n", "2", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_ctrl_c_tears_down_the_running_tests(pytester, mode):
+    # Plain pytest and xdist tear down the interrupted tests' fixtures (that is where
+    # environments are released). Lanes abandoned their threads: no teardown ran at all.
+    code, out, _ = interrupt(pytester, mode, "for _ in range(600): time.sleep(0.05)")
+    assert code == pytest.ExitCode.INTERRUPTED, out
+    assert len(list(pytester.path.glob("teardown-*"))) == 4, out
+    assert len(list(pytester.path.glob("session-teardown-*"))) == 4, out
+
+
+def test_ctrl_c_abandons_a_lane_blocked_past_the_grace_period(pytester):
+    # A lane blocked in one long C call cannot be interrupted; after the grace period
+    # the run ends anyway, and says which tests were left without teardown.
+    code, out, took = interrupt(pytester, ["--lanes", "4"], "time.sleep(120 if i == 0 else 0.01)",
+                                ini="[pytest]\nlanes_interrupt_grace = 2\n", wait_started=4)
+    assert code == pytest.ExitCode.INTERRUPTED, out
+    assert took < 30, took
+    assert "test_long[0]" in out and "without teardown" in out, out

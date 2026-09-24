@@ -15,11 +15,19 @@ rebuild it from a shared queue, so every run checks it:
 * in single-process mode, when the run was not stopped, every collected item
   finished exactly as many times as it was collected.
 
+``StdioWatch`` adds one more: ``sys.stdout``, ``sys.stderr`` and ``sys.stdin`` must
+stay the objects lanes installed while two or more lanes are running tests. A test
+that replaces one (click's ``CliRunner``, a direct assignment) receives every other
+lane's output meanwhile. ``contextlib.redirect_stdout``/``redirect_stderr`` are per
+lane (capture.py, P13) and exclusive tests run alone, so neither trips it. It samples
+every ``StdioWatch.INTERVAL`` seconds: a replacement shorter than that can go unseen.
+
 Any violation fails the run with ``IntegrityError`` (an INTERNALERROR, exit code 3)
 listing what was wrong: the outcomes of such a run cannot be trusted.
 """
 from __future__ import annotations
 
+import sys
 import threading
 from collections import Counter
 
@@ -30,6 +38,54 @@ _SHOWN = 20
 
 class IntegrityError(Exception):
     pass
+
+
+class StdioWatch:
+    """Samples sys.stdout/stderr/stdin while lanes run; see the module docstring."""
+
+    INTERVAL = 0.002
+    NAMES = ("stdout", "stderr", "stdin")
+
+    def __init__(self, ledger, nodes, exclusive_active) -> None:
+        self._ledger = ledger
+        self._nodes = nodes                        # the list of lanes, filled as they start
+        self._exclusive_active = exclusive_active  # () -> bool
+        self._expected = {name: getattr(sys, name) for name in self.NAMES}
+        self._stop = threading.Event()
+        self._reported: set = set()
+        self._thread = threading.Thread(target=self._run, name="lanes-stdio-watch", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.INTERVAL):
+            replaced = [n for n in self.NAMES if getattr(sys, n) is not self._expected[n]]
+            if replaced:
+                self._check(replaced)
+
+    def _check(self, replaced) -> None:
+        if self._exclusive_active():
+            return
+        running = sorted({item.nodeid for item in (n.current_item for n in list(self._nodes)) if item})
+        if len(running) < 2:
+            return
+        for name in replaced:
+            key = (name, tuple(running))
+            if key in self._reported:
+                continue
+            self._reported.add(key)
+            self._ledger._violation(
+                f"sys.{name} was replaced (by {type(getattr(sys, name)).__name__}) while these tests "
+                f"ran on concurrent lanes: {', '.join(running[:8])}"
+                f"{' ...' if len(running) > 8 else ''}. The other lanes' {name} went to the "
+                f"replacement. Mark the test that replaces it (click's CliRunner, a direct "
+                f"assignment) @pytest.mark.lanes_exclusive; contextlib.redirect_{name} is per "
+                f"lane already.")
 
 
 def _nodeid(name: str, kwargs: dict):

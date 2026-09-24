@@ -6,12 +6,13 @@ or makes it safe to share. Each one is a numbered touchpoint in CLAUDE.md and
 DESIGN.md, and ``probes.py`` checks it at startup:
 
 * P1 ``session._setupstate``: one SetupState per lane.
-* P2 ``FixtureDef.cached_result`` / ``_finalizers``: fixture caches per lane.
+* P2 ``FixtureDef.cached_result`` / ``_finalizers`` / ``cached_param``: fixture caches per lane.
 * P6 ``_pytest.runner._update_current_test_var``: ``PYTEST_CURRENT_TEST`` race.
 * P7 ``config._tmp_path_factory``: a basetemp per lane, as xdist gives each worker.
 * P10 ``config.workerinput`` / ``workeroutput``: each lane is its own xdist worker.
 * P11 ``_pytest.recwarn.WarningsRecorder.__enter__``: fail closed on pytest.warns
   before Python 3.14 (warning state is process-wide there).
+* P12 ``Cache.get``/``Cache.set``: serialized, so a concurrent read never sees a half-written value.
 * P3 and P8 (logging) live in ``capture.py``; C1 (third-party plugins) in ``compat.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import os
 import sys
 import threading
@@ -98,7 +100,48 @@ def patch_fixturedef() -> None:
 
     FixtureDef.cached_result = property(lambda self: slot(self)[0], _set_cr)
     FixtureDef._finalizers = property(lambda self: slot(self)[1], _set_fin)
+    for name in LANE_FIXTUREDEF_ATTRS:
+        setattr(FixtureDef, name, _PerLaneAttribute(name))
     FixtureDef._lanes_patched = True
+
+
+#: FixtureDef attributes that plugins set on setup and delete on finalization: pytest's
+#: setuponly plugin (--setup-show/--setup-only) keeps the fixture's param there.
+LANE_FIXTUREDEF_ATTRS = ("cached_param",)
+
+
+class _PerLaneAttribute:
+    """A FixtureDef attribute that each lane sets, reads and deletes on its own (P2).
+
+    Missing reads as missing (AttributeError), so ``hasattr``/``del`` keep working.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @staticmethod
+    def _store(obj) -> dict:
+        lane = LANE.get()
+        if lane is None:
+            return obj.__dict__.setdefault("_lanes_main_attrs", {})
+        return lane.fixture_state.setdefault((obj, "attrs"), {})
+
+    def __get__(self, obj, cls=None):
+        if obj is None:
+            return self
+        try:
+            return self._store(obj)[self.name]
+        except KeyError:
+            raise AttributeError(self.name) from None
+
+    def __set__(self, obj, value) -> None:
+        self._store(obj)[self.name] = value
+
+    def __delete__(self, obj) -> None:
+        try:
+            del self._store(obj)[self.name]
+        except KeyError:
+            raise AttributeError(self.name) from None
 
 
 # ------------------------------------------------------------ P6: PYTEST_CURRENT_TEST
@@ -300,6 +343,40 @@ class LaneStateFactory:
         return clone_log_handlers(self.log_templates)
 
 
+# ------------------------------------------------------------------ P12: config.cache
+CACHE_METHODS = ("get", "set")
+
+
+@contextlib.contextmanager
+def serialized_cache():
+    """P12: ``Cache.get``/``Cache.set`` under one process-wide lock.
+
+    pytest writes a value by truncating its file and then writing it, so a lane
+    reading at the same moment saw an empty file and got the default (45 of 200
+    concurrent get-after-set tests failed). Between xdist processes the same race
+    exists; within a process, lanes make it likely, so it is serialized here.
+    """
+    from _pytest.cacheprovider import Cache
+
+    lock = threading.RLock()
+    originals = {name: Cache.__dict__[name] for name in CACHE_METHODS}
+
+    def locked(fn):
+        @functools.wraps(fn)
+        def method(self, *args, **kwargs):
+            with lock:
+                return fn(self, *args, **kwargs)
+        return method
+
+    for name, fn in originals.items():
+        setattr(Cache, name, locked(fn))
+    try:
+        yield
+    finally:
+        for name, fn in originals.items():
+            setattr(Cache, name, fn)
+
+
 @contextlib.contextmanager
 def isolate_lanes(config, session, is_exclusive):
     """Install every per-lane isolation; yields a ``LaneStateFactory``."""
@@ -313,6 +390,7 @@ def isolate_lanes(config, session, is_exclusive):
         log_templates = stack.enter_context(per_lane_logging(config))    # P3
         stack.enter_context(snapshot_logger_dict())                       # P8
         stack.enter_context(serialized_rerunfailures_client(config))      # C1
+        stack.enter_context(serialized_cache())                           # P12
         if config.getoption("capture") != "no":                          # -s: no capture, as xdist
             stack.enter_context(per_lane_std_streams())
         yield LaneStateFactory(setupstate_cls, log_templates)

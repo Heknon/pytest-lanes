@@ -294,3 +294,40 @@ def test_ok_findings_are_counted_not_listed(pytester):
     out = r.stdout.str()
     assert "module:infra.CACHE" not in out, out
     r.stdout.fnmatch_lines(["*1 set-once (caches set once, then stable)*JSON*"])
+
+
+# ---------------------------------------------------------------- process-wide setters and stdio (round 4)
+def test_process_wide_setters_and_stdio_swaps_are_recorded(pytester):
+    # Each broke concurrent tests in round 4 while the detector saw nothing.
+    pytester.makepyfile(test_a="""
+        import contextlib, gc, io, random, socket, sys
+        def test_seed():
+            random.seed(42)
+        def test_socket_timeout():
+            old = socket.getdefaulttimeout(); socket.setdefaulttimeout(5); socket.setdefaulttimeout(old)
+        def test_recursion_limit():
+            old = sys.getrecursionlimit(); sys.setrecursionlimit(old + 1); sys.setrecursionlimit(old)
+        def test_gc():
+            gc.disable(); gc.enable()
+        def test_swap_stdout():
+            real = sys.stdout; sys.stdout = io.StringIO()
+            try:
+                import time; time.sleep(0.05)
+            finally:
+                sys.stdout = real
+        def test_redirect_is_per_lane():
+            with contextlib.redirect_stdout(io.StringIO()):
+                import time; time.sleep(0.05)
+        def test_private_rng_is_fine():
+            random.Random(1).random()
+    """)
+    r, report = detect(pytester)
+    r.assert_outcomes(passed=7)
+    patched = findings(report, "patched")
+    for path, test in [("random.seed()", "test_seed"), ("socket.setdefaulttimeout()", "test_socket_timeout"),
+                       ("sys.setrecursionlimit()", "test_recursion_limit"), ("gc.disable()", "test_gc"),
+                       ("sys.stdout", "test_swap_stdout")]:
+        assert path in patched and patched[path]["examples"] == [f"test_a.py::{test}"], (path, report)
+    unsafe_tests = set(report["unsafe_tests"])
+    assert "test_a.py::test_redirect_is_per_lane" not in unsafe_tests, report
+    assert "test_a.py::test_private_rng_is_fine" not in unsafe_tests, report

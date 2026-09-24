@@ -54,6 +54,8 @@ def pytest_addoption(parser):
                   "node hooks; others never see them", type="args", default=["conftest"])
     parser.addini("lanes_exclusive_fixtures", "fixtures forcing a test into the serial phase",
                   type="args", default=list(DEFAULT_EXCLUSIVE))
+    parser.addini("lanes_interrupt_grace", "seconds to wait after Ctrl-C for interrupted lanes to "
+                  "run their teardown", default="30")
 
     g.addoption("--lanes-detect", action="store_true", default=False,
                 help="run tests one at a time and report which ones change process-wide state "
@@ -103,8 +105,9 @@ def pytest_configure(config):
         pm.register(HybridWorkerSession(config), "lanes-session")
     elif getattr(config.option, "numprocesses", None) or getattr(config.option, "tx", None):
         # Hybrid, controller side: real xdist DSession and processes; lanes are virtual nodes.
+        controller = LanesController(config)     # passes interpreter flags on to the workers
         check_controller_touchpoints(config)
-        pm.register(LanesController(config), "lanes-controller")
+        pm.register(controller, "lanes-controller")
     else:
         if getattr(config.option, "trace", False):
             raise pytest.UsageError("--lanes is incompatible with --trace: pdb would block a lane")

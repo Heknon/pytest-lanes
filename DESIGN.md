@@ -49,7 +49,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | # | Touchpoint | Why |
 |---|---|---|
 | P1 | `session._setupstate` | Gives each lane its own SetupState |
-| P2 | `FixtureDef.cached_result` / `_finalizers` | Per-lane fixture caches |
+| P2 | `FixtureDef.cached_result` / `_finalizers` / `cached_param` | Per-lane fixture caches, and the param pytest's `--setup-show` keeps on the FixtureDef |
 | P3 | `LoggingPlugin.caplog_handler` / `report_handler` | Per-lane log capture |
 | P4 | pluggy `_inner_hookexec` | Routes controller hooks to the main thread |
 | P5 | `item._nodeid` | Adds the `@group` suffix under loadgroup, as xdist's worker does |
@@ -64,7 +64,9 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
 | X4 | `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Hybrid mode only; mirrored on each `LaneProxy` so custom schedulers see worker-shaped nodes |
-| D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` / `_unpatch_dict` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
+| P12 | `_pytest.cacheprovider.Cache.get` / `.set` | Serialized per process: a concurrent read saw a half-written value |
+| P13 | stdlib `contextlib._RedirectStream.__enter__` / `__exit__` | `redirect_stdout`/`redirect_stderr` redirect only the lane that entered them |
+| D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` / `_unpatch_dict`, `contextlib._RedirectStream` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
 
 ## Verified
 
@@ -111,6 +113,23 @@ An adversarial sweep ran about 60 scenarios under `-n`, `--lanes` and hybrid, an
    - `--dist` was ignored without `-n`.
 
 Verified to match xdist, and now locked in by tests: every outcome kind under all four dist modes (including unittest, doctests, xfail/xpass/strict, setup and teardown errors, and odd parametrize IDs), junitxml, rerunfailures, pytest-html, `--co`/`--setup-*`, empty and deselected runs, lane-count extremes, a lane dying inside the protocol (INTERNALERROR, no hang), `KeyboardInterrupt`, `pytest.exit`, and hybrid restart exhaustion. A 3,000-test × 200-lane stress run on 3.12 and 3.14t produced every report exactly once.
+
+### Found and fixed in round 4 (plugins, OS behaviour, silent failures)
+
+A harness (`plain`, `-n 2`, `--lanes 3`, `-n 2 --lanes 2`; outcomes, exit codes and hangs compared with xdist) ran 55 scenarios: pytest-cov, pytest-asyncio (function and session loops), pytest-mock, pytest-repeat, pytest-check, pytest-order, pytest-dependency, pytest-randomly, pytest-timeout, pytest-env, rerunfailures `only_rerun`; `fork` while other lanes log, `spawn`, subprocess and fd-level output, `input()`, `sys.exit`, deep recursion, thread and unraisable exceptions, circular imports on two lanes; cache (`--lf`, `--sw`, `config.cache`), live logging, log files, `--durations`, junit properties, unittest, nose-style and dynamic-scope fixtures, subtests, `pytest.exit`, Ctrl-C and SIGTERM. Each bug got a test first:
+
+1. **`input()` hung forever in a terminal** (`--lanes N`). Lanes switch pytest's capture off, so `sys.stdin` stayed the terminal. It is now a stand-in that fails the read with pytest's own message; left alone with `-s`.
+2. **`config.cache` lost values across lanes (P12).** `Cache.set` truncates, then writes; a concurrent `get` read an empty file and got the default: 45 of 200 get-after-set tests failed. `get`/`set` are serialized per process.
+3. **`contextlib.redirect_stdout`/`redirect_stderr` captured every lane (P13).** They swap `sys.stdout` for the process. On a lane they now push the target on that lane's own stack, which its `_LaneStream` writes to; nesting works, and bytes written to `.buffer` follow.
+4. **Replacing `sys.stdout` directly (click's `CliRunner`) misattributed output silently.** It cannot be made per lane, so `StdioWatch` (integrity.py) samples `sys.stdout`/`stderr`/`stdin` every 2 ms while two or more lanes run tests (not during exclusive tests) and fails the run naming the tests. `lanes_exclusive` makes such a test safe.
+5. **Ctrl-C skipped teardown.** Plain pytest and xdist tear down the interrupted tests' fixtures (where environments are released); lanes abandoned their threads, so none ran. The main thread now raises `KeyboardInterrupt` in each lane (C API `PyThreadState_SetAsyncExc`), each lane tears down its own fixtures, and it waits up to `lanes_interrupt_grace` (30s). A second Ctrl-C stops waiting; a lane blocked in one long C call is named as left without teardown. A test raising `KeyboardInterrupt` itself still ends the run.
+6. **Hybrid mode with `-X context_aware_warnings=1` refused in every worker**, each with a traceback, ending "no tests ran" (exit 5): xdist starts workers without the controller's `-X` options. The controller passes them on as environment variables, and refuses up front (exit 4) when its workers would.
+7. **`--setup-show`/`--setup-only` raised AttributeError on 3.14t (P2).** pytest's setuponly plugin keeps the fixture's param on the shared FixtureDef (`cached_param`) and deletes it on finalization; one lane deleted it while another printed it (3 of 5 runs). Found by repeating the suite on 3.14t; it is now a per-lane attribute.
+
+Also found, and not bugs of lanes:
+- `mock.patch`/`mocker.patch` of shared objects, `random.seed`, `socket.setdefaulttimeout` broke concurrent tests, as expected of process-wide state (F1). `--lanes-detect` now records the stdlib's process-wide setters (`random.seed`, `socket.setdefaulttimeout`, `locale.setlocale`, `os.umask`, `time.tzset`, `sys.setrecursionlimit`, `logging.disable`, `gc.*`, `signal.signal`) and `sys.stdout`/`stderr`/`stdin` swaps.
+- Differences from xdist that are expected: a session fixture's teardown error is reported once per lane (once per worker under xdist); `pytest.exit(returncode=N)` keeps its code in single-process lanes (xdist turns it into an INTERNALERROR); `--sw`/`-x` stop at a different point, as xdist's do; a pytest-timeout in hybrid mode kills the worker (F13).
+- Seen once and not reproduced: `test_capfd_routed_to_serial_phase` failed once in a full 3.14t run; 24 stressed runs and repeated full runs passed.
 
 ### Silent corruption is made loud
 
@@ -178,7 +197,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F5 | **Crash collateral:** in-flight tests on sibling lanes are reported as crashed. They rerun, but the reports remain. |
 | F6 | **Exclusive tests pause lanes.** In hybrid mode an exclusive test waits for, and then blocks, every lane in its process; with hour-long tests that can drain the process for hours. Keep `capsys`/`capfd`/`recwarn` tests out of long suites, or run them in a separate plain invocation. |
 | F7 | **`each` and `worksteal` modes are unsupported.** worksteal is implementable. `--pdb` is unsupported, as it is under xdist. |
-| F8 | **Ctrl-C** doesn't interrupt running tests. |
+| F8 | **Ctrl-C** interrupts every lane and runs its teardown (round 4); a lane blocked in one long C call cannot be interrupted and is abandoned after `lanes_interrupt_grace`, named. SIGTERM kills the process without teardown, as it does plain pytest. |
 | F9 | **`--lanes` means lanes per process in hybrid mode.** The total is `-n` × `--lanes`. |
 | F10 | **Wall-clock assertions in `tests/`** are load-sensitive. The round-1 intermittent failure was most likely the P7 basetemp race, now fixed. |
 | F11 | **`PYTEST_XDIST_WORKER` is per process.** Fixed for `worker_id`, `testrun_uid`, `xdist.get_xdist_worker_id()` and `config.workerinput`, which name the lane (P10). An environment variable cannot differ per thread, so code that reads `PYTEST_XDIST_WORKER` (or `PYTEST_XDIST_WORKER_COUNT`) sees the process's value. Switch it to `worker_id` or `xdist.get_xdist_worker_id(request)`. |

@@ -10,6 +10,10 @@
   drives teardown, and stop at SHUTDOWN;
 * the main-thread event loop (``_pump``), which replays routed hooks and tells
   the controller side about each finished item;
+* Ctrl-C (``_interrupt``): the running lanes get ``KeyboardInterrupt`` too, tear
+  down their fixtures on their own thread, as pytest does after an interrupt, and
+  are waited for up to the ``lanes_interrupt_grace`` ini (a second Ctrl-C stops
+  waiting). A lane blocked in one long C call cannot be interrupted, and is named;
 * the exclusivity lock: tests that swap process-wide streams or warning state
   run alone within their process. That is tests using capsys, capfd, recwarn (the
   ``lanes_exclusive_fixtures`` ini), marked ``lanes_exclusive``, and doctests,
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -29,7 +34,7 @@ import pytest
 
 from .capture import capture_phase
 from .hookrouting import ControllerHookRouter, HookCall
-from .integrity import Ledger
+from .integrity import Ledger, StdioWatch
 from .isolation import isolate_lanes
 from .lane import LANE, SHUTDOWN, ThreadNode
 
@@ -66,7 +71,9 @@ class LaneRunner:
         self.errors: list = []                     # exceptions escaping a lane thread
         self.teardown_errors: list = []            # (lane id, error) from teardown after a stop
         self.exclusive_lock = ReadWriteLock()
+        self.interrupting = False                  # Ctrl-C: _interrupt is stopping the lanes
         self.ledger = Ledger()                     # run-time integrity check (integrity.py)
+        self.nodes: list = []                      # every lane of this process, as created
         self._session_stack = contextlib.ExitStack()
 
     # ---- session-long install / uninstall -------------------------------------
@@ -77,6 +84,9 @@ class LaneRunner:
         self.hooks = stack.enter_context(ControllerHookRouter(
             self.config.pluginmanager, self.events, session, set_report_node=self.set_report_node,
             ledger=self.ledger))
+        watch = StdioWatch(self.ledger, self.nodes, lambda: self.exclusive_lock.exclusive_active)
+        watch.start()
+        stack.callback(watch.stop)
 
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(self, session):
@@ -97,8 +107,10 @@ class LaneRunner:
 
     # ---- lanes ------------------------------------------------------------------
     def new_node(self, id_: str) -> ThreadNode:
-        return ThreadNode(id_, self.lane_workerinput(id_), setupstate=self.lane_state.setupstate(),
+        node = ThreadNode(id_, self.lane_workerinput(id_), setupstate=self.lane_state.setupstate(),
                           log_handlers=self.lane_state.log_handlers())
+        self.nodes.append(node)
+        return node
 
     def lane_workerinput(self, id_: str) -> dict:
         """A lane's workerinput, shaped like the one xdist hands a worker."""
@@ -126,6 +138,9 @@ class LaneRunner:
         def run():
             try:
                 self._node_loop(node, items)
+            except KeyboardInterrupt as e:  # torn down already (_node_loop)
+                if not self.interrupting:     # raised by the test itself: end the run, as pytest
+                    self.errors.append(e)
             except BaseException as e:  # re-raised on the main thread by _pump
                 self.errors.append(e)
 
@@ -165,6 +180,11 @@ class LaneRunner:
                 if self.stopping(session):      # as xdist's worker loop, after each item
                     break
             self._final_teardown(node)
+        except KeyboardInterrupt:
+            # As pytest after Ctrl-C (its sessionfinish): tear down what this lane holds.
+            node.current_item = None
+            self._final_teardown(node)
+            raise
         finally:
             LANE.reset(token)
 
@@ -196,6 +216,20 @@ class LaneRunner:
         whose scheduler lives in the controller). ``on_done(node, index, duration)``
         and ``before_replay(call)`` are the hybrid worker's hooks into the loop.
         """
+        try:
+            self._pump_events(threads, sched, session, nodes, on_done, before_replay)
+        except KeyboardInterrupt:
+            self._interrupt(threads, nodes)
+            raise
+        for t in threads:
+            t.join()
+        self.report_teardown_errors()
+        self.teardown_errors.clear()
+        if self.errors:
+            raise self.errors[0]
+        self.ledger.raise_if_violated()
+
+    def _pump_events(self, threads, sched, session, nodes, on_done, before_replay) -> None:
         while True:
             try:
                 event = self.events.get(timeout=0.05)
@@ -222,13 +256,59 @@ class LaneRunner:
                 for n in nodes:
                     n.shutdown()
             event.ack.set()
-        for t in threads:
-            t.join()
-        self.report_teardown_errors()
-        self.teardown_errors.clear()
-        if self.errors:
-            raise self.errors[0]
-        self.ledger.raise_if_violated()
+
+    def _interrupt(self, threads, nodes) -> None:
+        """Ctrl-C on the main thread: interrupt the lanes, let them tear down, wait."""
+        self.interrupting = True
+        self.stop.set()
+        for n in nodes:
+            n.shutdown()
+        running = {t: n for t, n in zip(threads, nodes) if t.is_alive()}
+        for t in running:
+            raise_in_thread(t, KeyboardInterrupt)
+        grace = float(self.config.getini("lanes_interrupt_grace"))
+        deadline = time.monotonic() + grace
+        self._say(f"Interrupted: stopping {len(running)} lane(s) and running their teardown "
+                  f"(up to {grace:g}s; press Ctrl-C again to stop waiting)")
+        try:
+            while any(t.is_alive() for t in running) and time.monotonic() < deadline:
+                try:
+                    event = self.events.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if isinstance(event, HookCall):
+                    self.hooks.replay(event)    # reports of tests that did finish
+                else:
+                    event.ack.set()
+        except KeyboardInterrupt:
+            pass
+        left = [(n.gateway.id, n.current_item) for t, n in running.items() if t.is_alive()]
+        for lane_id, item in left:
+            test = item.nodeid if item is not None else "between tests"
+            self._say(f"lane {lane_id} did not stop: {test} was left without teardown "
+                      f"(blocked in a call that cannot be interrupted)")
+
+    def _say(self, line: str) -> None:
+        tr = self.config.pluginmanager.get_plugin("terminalreporter")
+        if tr is not None:
+            tr.write_line(line, yellow=True)
+        else:
+            sys.stderr.write(line + "\n")
+
+
+def raise_in_thread(thread: threading.Thread, exc_type) -> bool:
+    """Raise ``exc_type`` in ``thread`` when it next runs Python code (CPython C API).
+
+    Best effort: a thread blocked in one long C call (a sleep, a socket read without
+    a timeout) only sees it once that call returns.
+    """
+    import ctypes
+
+    if thread.ident is None:
+        return False
+    set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
+    return set_async_exc(thread.ident, exc_type) == 1
 
 
 class ReadWriteLock:
@@ -239,6 +319,11 @@ class ReadWriteLock:
         self._readers = 0
         self._writer = False
         self._waiting = 0
+
+    @property
+    def exclusive_active(self) -> bool:
+        """An exclusive test holds the lock: it runs alone (other lanes wait)."""
+        return self._writer
 
     @contextlib.contextmanager
     def shared(self):

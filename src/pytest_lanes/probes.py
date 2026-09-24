@@ -87,6 +87,24 @@ def _p11_warnings_recorder(config):
     return None
 
 
+def _p12_cache(config):
+    if config.pluginmanager.get_plugin("cacheprovider") is None:
+        return None
+    from _pytest.cacheprovider import Cache
+
+    from .isolation import CACHE_METHODS
+
+    if not all(callable(Cache.__dict__.get(name)) for name in CACHE_METHODS):
+        return "P12 _pytest.cacheprovider.Cache.get/set"
+    return None
+
+
+def _p13_redirect(config):
+    from .capture import check_p13
+
+    return check_p13() if config.getoption("capture") != "no" else None
+
+
 def _p4_hookexec(config):
     if not hasattr(config.pluginmanager, "_inner_hookexec"):
         return "P4 pluggy PluginManager._inner_hookexec"
@@ -174,7 +192,8 @@ def _per_test_global_hooks(config):
 
 CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
           _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
-          _p10_worker_identity, _p11_warnings_recorder, _x1_xdist_scheduler_api,
+          _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect,
+          _x1_xdist_scheduler_api,
           _c1_rerunfailures_client,
           _pytest_timeout, _faulthandler_timeout)
 
@@ -205,7 +224,11 @@ def _x4_worker_attributes(config):
     return None
 
 
-CONTROLLER_CHECKS = (_x3_handle_crashitem, _x4_worker_attributes, _faulthandler_timeout)
+#: The environment checks are the workers': refuse here, once, rather than in every worker
+#: (each with a traceback, and a run ending "no tests ran"). The workers run the same
+#: interpreter, with the flags the controller passes on (controller.propagate_interpreter_flags).
+CONTROLLER_CHECKS = (_x3_handle_crashitem, _x4_worker_attributes, _faulthandler_timeout,
+                     _warnings, _per_test_global_hooks)
 
 
 def check_controller_touchpoints(config) -> None:

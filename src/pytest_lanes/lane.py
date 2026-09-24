@@ -61,6 +61,9 @@ class ThreadNode:
         self.fixture_state: dict = {}
         self.out = io.StringIO()
         self.err = io.StringIO()
+        # contextlib.redirect_stdout/stderr targets entered on this lane, innermost last
+        # (capture.py, P13): the lane's writes go there instead of its buffers.
+        self.redirects: dict = {"out": [], "err": []}
         self.log_handlers = log_handlers
         self.tmp_path_factory = None  # this lane's basetemp, created on first use (isolation.py)
         self.current_item = None      # the item this lane is running, if any

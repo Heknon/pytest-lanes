@@ -8,7 +8,11 @@ process, so there the barrier is off.
 import sys
 
 import pytest
-from lanes_testing import MODES, report_log, run
+from lanes_testing import BASE, MODES, report_log, run
+
+#: BASE with the cache provider on (it is off everywhere else). BASE is "-p X" pairs.
+WITH_CACHE = [arg for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:cacheprovider")
+              for arg in pair]
 
 ONE_PROCESS = {"lanes": ["--lanes", "3"], "hybrid": ["-n", "1", "--lanes", "3"]}
 
@@ -258,3 +262,100 @@ def test_pytest_warns_runs_normally_with_context_aware_warnings(pytester, monkey
     monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "1")
     pytester.makepyfile(WARNS_TESTS)
     run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=3)
+
+
+# ---------------------------------------------------------------- stdin (round 4)
+@pytest.mark.parametrize("name", MODES.keys())
+def test_reading_stdin_fails_as_under_capture(pytester, name):
+    # pytest's capture replaces sys.stdin so a test reading it fails at once. Lanes turn
+    # pytest's capture off, so without the same guard a lane blocked on the terminal
+    # forever (found with a pty); without a terminal it raised EOFError instead.
+    pytester.makepyfile("""
+        def test_input():
+            input("prompt> ")
+        def test_other():
+            pass
+    """)
+    r = run(pytester, *MODES[name], timeout=60)
+    r.assert_outcomes(passed=1, failed=1)
+    r.stdout.fnmatch_lines(["*OSError: pytest: reading from stdin while output is captured*"])
+
+
+def test_stdin_is_left_alone_with_no_capture(pytester):
+    pytester.makepyfile("""
+        import sys
+        def test_input():
+            assert "reading from stdin" not in type(sys.stdin).__name__
+            assert sys.stdin.readline() == ""       # pytester closes stdin: EOF
+    """)
+    run(pytester, "--lanes", "2", "-s", timeout=60).assert_outcomes(passed=1)
+
+
+# ---------------------------------------------------------------- config.cache (round 4)
+@pytest.mark.parametrize("mode", [["--lanes", "8"], ["-n", "1", "--lanes", "8"]], ids=["lanes", "hybrid"])
+def test_config_cache_is_safe_across_lanes(pytester, mode):
+    # pytest writes a cache value by truncating the file, then writing it: a lane reading
+    # concurrently saw an empty file and got the default (2 of 40 tests failed).
+    pytester.makepyfile("""
+        import pytest
+        @pytest.mark.parametrize("i", range(200))
+        def test_t(i, request):
+            cache = request.config.cache
+            cache.set(f"lanes/k{i % 3}", {"i": i, "pad": "x" * 20000})
+            value = cache.get(f"lanes/k{i % 3}", None)
+            assert value is not None and "i" in value
+    """)
+    r = pytester.runpytest_subprocess(*WITH_CACHE, *mode, timeout=120)
+    r.assert_outcomes(passed=200)
+
+
+# ---------------------------------------------------------------- redirected and replaced stdio (round 4)
+REDIRECT_TESTS = """
+import contextlib, io, sys, time, pytest
+@pytest.mark.parametrize("i", range(4))
+def test_redirect(i):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        for _ in range(20):
+            print(f"mine-{i}"); sys.stderr.write(f"err-{i}\\n"); time.sleep(0.005)
+        with contextlib.redirect_stdout(io.StringIO()) as inner:
+            print("nested")
+        assert inner.getvalue() == "nested\\n"
+    assert set(out.getvalue().split()) == {f"mine-{i}"}, out.getvalue()[:200]
+    assert set(err.getvalue().split()) == {f"err-{i}"}
+    print(f"after-{i}")
+@pytest.mark.parametrize("i", range(4))
+def test_printer(i):
+    for _ in range(40):
+        print(f"other-{i}"); time.sleep(0.003)
+"""
+
+
+@pytest.mark.parametrize("name", MODES.keys())
+def test_redirect_stdout_is_per_lane(pytester, name):
+    # contextlib.redirect_stdout swaps sys.stdout for the whole process: under lanes it
+    # captured every other lane's prints too (all 4 redirecting tests failed). On a lane
+    # it now redirects that lane's output only.
+    pytester.makepyfile(REDIRECT_TESTS)
+    result, rows = report_log(pytester, *MODES[name], "-rA", timeout=60)
+    result.assert_outcomes(passed=8)
+    result.stdout.fnmatch_lines(["*after-0*"])       # output after the block is captured again
+
+
+# ---------------------------------------------------------------- --setup-show / --setup-only (round 4)
+@pytest.mark.parametrize("flag", ["--setup-show", "--setup-only"])
+def test_setup_show_on_many_lanes(pytester, flag):
+    # pytest's setuponly plugin sets FixtureDef.cached_param on setup and deletes it on
+    # finalization; FixtureDef is shared by all lanes, so one lane deleted what another
+    # was about to print (AttributeError, seen on 3.14t). It is per lane now (P2).
+    pytester.makepyfile("""
+        import pytest
+        @pytest.fixture(params=range(4))
+        def p(request):
+            return request.param
+        @pytest.mark.parametrize("i", range(100))
+        def test_t(i, p):
+            pass
+    """)
+    r = run(pytester, "--lanes", "16", flag, timeout=120)
+    assert r.ret == pytest.ExitCode.OK, r.stdout.str()[-2000:]

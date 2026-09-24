@@ -13,7 +13,14 @@ recorder catches these as they happen:
 * pytest's ``MonkeyPatch`` (public API): ``setattr``, ``delattr``, ``setitem``,
   ``delitem``, ``setenv``, ``delenv``, ``chdir`` and ``syspath_prepend``;
 * Python audit events ``os.putenv``, ``os.unsetenv`` and ``os.chdir`` (public),
-  which cover direct ``os.environ`` writes and ``os.chdir``.
+  which cover direct ``os.environ`` writes and ``os.chdir``;
+* the stdlib's process-wide setters (``SETTERS``: ``random.seed``,
+  ``socket.setdefaulttimeout``, ``locale.setlocale``, ``os.umask``, ...), called
+  from anywhere but pytest's own machinery. Each broke concurrent tests in round 4;
+* ``sys.stdout``/``stderr``/``stdin`` replaced during a test (click's CliRunner, a
+  direct assignment), sampled every ``STDIO_INTERVAL`` seconds. pytest's own capture
+  objects and ``contextlib.redirect_*`` targets are not reported: under lanes the
+  redirect is per lane (capture.py, P13).
 
 Everything is installed for the session and restored at its end, except the audit
 hook, which Python cannot remove: it is disabled instead.
@@ -30,6 +37,17 @@ import pytest
 from .sources import IGNORED_ENV
 
 _NOTSET = object()
+
+#: Process-wide setters: (module, function). A call changes state every lane shares.
+SETTERS = (("random", "seed"), ("random", "setstate"), ("socket", "setdefaulttimeout"),
+           ("locale", "setlocale"), ("os", "umask"), ("time", "tzset"),
+           ("sys", "setrecursionlimit"), ("sys", "setswitchinterval"), ("logging", "disable"),
+           ("gc", "disable"), ("gc", "set_threshold"), ("gc", "freeze"), ("signal", "signal"))
+#: Callers whose setter calls are pytest's own business, not the test's.
+MACHINERY = ("_pytest", "pytest", "pluggy", "xdist", "pytest_lanes", "pytest_timeout",
+             "coverage", "pytest_cov", "execnet")
+STDIO = ("stdout", "stderr", "stdin")
+STDIO_INTERVAL = 0.001
 
 
 def check_d1() -> str | None:
@@ -71,6 +89,9 @@ class Recorder:
         self.targets: set = set()
         self._lock = threading.Lock()
         self._muted = 0             # inside patch.dict(os.environ): it rewrites every key
+        self._poller = None
+        self._poller_stop = threading.Event()
+        self._redirect_targets: set = set()   # ids of active contextlib.redirect_* targets
 
     def add(self, target: str) -> None:
         if self._active and threading.current_thread() is self._owner:
@@ -89,10 +110,34 @@ class Recorder:
         self.targets = set()
         self._owner = threading.current_thread()
         self._active = True
+        self._start_poller()
 
     def stop(self) -> set:
         self._active = False
+        if self._poller is not None:
+            self._poller_stop.set()
+            self._poller.join()
+            self._poller = None
         return self.targets
+
+    # ---- stdio replacement, sampled while a test runs ---------------------------------
+    def _start_poller(self) -> None:
+        baseline = {name: getattr(sys, name) for name in STDIO}
+        self._poller_stop = threading.Event()
+
+        def poll():
+            while not self._poller_stop.wait(STDIO_INTERVAL):
+                for name in STDIO:
+                    current = getattr(sys, name)
+                    if current is baseline[name] or id(current) in self._redirect_targets:
+                        continue
+                    if (type(current).__module__ or "").startswith("_pytest"):
+                        continue                    # pytest's own capture, suspended and resumed
+                    with self._lock:
+                        self.targets.add(f"sys.{name}")
+
+        self._poller = threading.Thread(target=poll, name="lanes-detect-stdio", daemon=True)
+        self._poller.start()
 
     # ---- session-long install -----------------------------------------------------
     @contextlib.contextmanager
@@ -105,6 +150,11 @@ class Recorder:
                 original = owner.__dict__[name]
                 setattr(owner, name, make(original))
                 stack.callback(setattr, owner, name, original)
+
+            def patch_attr_module(module, name, make):
+                original = vars(module)[name]
+                setattr(module, name, make(original))
+                stack.callback(setattr, module, name, original)
 
             def mock_enter(original):
                 def __enter__(self):
@@ -200,6 +250,45 @@ class Recorder:
             def gated(event, args):
                 if state["on"]:
                     audit(event, args)
+
+            def setter(module, name):
+                def wrap(original):
+                    label = f"{module}.{name}()"
+
+                    def call(*args, **kwargs):
+                        caller = sys._getframe(1).f_globals.get("__name__", "")
+                        if caller.partition(".")[0] not in MACHINERY and not (
+                                name == "setlocale" and (len(args) < 2 or args[1] is None)
+                                and kwargs.get("locale") is None):
+                            rec.add(label)
+                        return original(*args, **kwargs)
+                    return call
+                return wrap
+
+            import importlib
+
+            for module, name in SETTERS:
+                owner = importlib.import_module(module)
+                if name in vars(owner):
+                    patch_attr_module(owner, name, setter(module, name))
+
+            def redirect_enter(original):
+                def __enter__(self):
+                    rec._redirect_targets.add(id(self._new_target))
+                    return original(self)
+                return __enter__
+
+            def redirect_exit(original):
+                def __exit__(self, *exc):
+                    try:
+                        return original(self, *exc)
+                    finally:
+                        rec._redirect_targets.discard(id(self._new_target))
+                return __exit__
+
+            redirect = contextlib._RedirectStream
+            patch_attr(redirect, "__enter__", redirect_enter)
+            patch_attr(redirect, "__exit__", redirect_exit)
 
             sys.addaudithook(gated)
             stack.callback(state.update, on=False)   # audit hooks cannot be removed

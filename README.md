@@ -69,13 +69,20 @@ Tests in one scope run sequentially, in order, on one lane; different scopes run
 | `@pytest.mark.lanes_exclusive` | Run this test alone within its process. Doctests always are, since doctest swaps `sys.stdout` for the whole process |
 | ini `lanes_exclusive_fixtures` | Fixtures that make a test exclusive. Default: capsys, capsysbinary, capfd, capfdbinary, capteesys, recwarn. Requesting one at run time (`request.getfixturevalue`) from a test that is not exclusive fails that test with instructions |
 | `-s` / `--capture=no` | As under xdist: test output goes straight to the terminal. Log records are still captured per test |
+| ini `lanes_interrupt_grace` | Seconds to wait after Ctrl-C for the interrupted lanes to run their teardown (default 30). A second Ctrl-C stops waiting |
 | `--lanes-xdist-node-hooks` + ini `lanes_node_hook_plugins` | Single-process mode: fire xdist's `pytest_testnodeready` / `testnodedown` for each lane, but only to the named plugins (default `conftest`) |
 
 Each lane is its own xdist worker: `worker_id`, `testrun_uid`, `xdist.get_xdist_worker_id(request)` and `config.workerinput["workerid"]` give the lane, such as `ln3` or `gw2.ln3`, so resources named after the worker do not collide. The `PYTEST_XDIST_WORKER` environment variable is per process and cannot tell lanes apart. Each test report carries `report.lane_id`. In single-process mode `report.node` is the lane, just as it is the worker under xdist.
 
 ### What you must know before pointing it at a real suite
 
-Lanes are threads, so anything process-global is shared between concurrently running tests. That includes `mock.patch`, monkeypatching shared modules, `os.environ`, `chdir`, signals, and logging levels. Mark such tests `lanes_exclusive`, or fix them. Other limits:
+Lanes are threads, so anything process-global is shared between concurrently running tests. That includes `mock.patch`, monkeypatching shared modules, `os.environ`, `chdir`, signals, logging levels, `random.seed`, `socket.setdefaulttimeout` and `locale.setlocale`. Mark such tests `lanes_exclusive`, or fix them; `pytest --lanes-detect` (below) finds them. Handled for you:
+- `contextlib.redirect_stdout`/`redirect_stderr` redirect only the lane that entered them.
+- Replacing `sys.stdout` directly, as click's `CliRunner` does, cannot be made per lane: the run fails and names the tests. Mark them `lanes_exclusive`.
+- A test reading stdin fails at once, as under pytest's capture.
+- Ctrl-C interrupts the running tests and runs their teardown (see `lanes_interrupt_grace`).
+
+Other limits:
 - A hung thread cannot be killed. pytest-timeout is refused in single-process mode (on a timeout it would end the whole process) but works in hybrid mode, where xdist replaces the worker. `faulthandler_timeout` is refused in both modes.
 - A crash takes down every lane in its process.
 - Output from threads your tests start is attributed to the test only on Python 3.14 with `-X thread_inherit_context=1`.
