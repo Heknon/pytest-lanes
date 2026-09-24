@@ -54,6 +54,10 @@ def pytest_addoption(parser):
                   "node hooks; others never see them", type="args", default=["conftest"])
     parser.addini("lanes_exclusive_fixtures", "fixtures forcing a test into the serial phase",
                   type="args", default=list(DEFAULT_EXCLUSIVE))
+    g.addoption("--lanes-allow-patches", action="store_true", default=False,
+                help="allow process-wide patches (mock.patch or monkeypatch of a module or class, "
+                     "environment, chdir, sys.path) in tests that are not lanes_exclusive")
+    parser.addini("lanes_allow_patches", "same as --lanes-allow-patches", type="bool", default=False)
     parser.addini("lanes_interrupt_grace", "seconds to wait after Ctrl-C for interrupted lanes to "
                   "run their teardown", default="30")
 
@@ -84,6 +88,8 @@ def pytest_load_initial_conftests(early_config, parser, args):
 @pytest.hookimpl(trylast=True)  # after builtins configure (the P7 probe needs tmpdir's factory)
 def pytest_configure(config):
     config.addinivalue_line("markers", "lanes_exclusive: run in the serial phase, alone")
+    config.addinivalue_line("markers", "lanes_allow_patches: this test's process-wide patches are "
+                                       "safe (nothing another test runs uses what it patches)")
     lanes = config.getoption("lanes")
     if config.getoption("lanes_detect"):
         refuse_concurrent(config)

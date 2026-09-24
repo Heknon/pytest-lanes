@@ -69,6 +69,7 @@ Tests in one scope run sequentially, in order, on one lane; different scopes run
 | `@pytest.mark.lanes_exclusive` | Run this test alone within its process. Doctests always are, since doctest swaps `sys.stdout` for the whole process |
 | ini `lanes_exclusive_fixtures` | Fixtures that make a test exclusive. Default: capsys, capsysbinary, capfd, capfdbinary, capteesys, recwarn. Requesting one at run time (`request.getfixturevalue`) from a test that is not exclusive fails that test with instructions |
 | `-s` / `--capture=no` | As under xdist: test output goes straight to the terminal. Log records are still captured per test |
+| `--lanes-allow-patches`, ini `lanes_allow_patches`, `@pytest.mark.lanes_allow_patches` | Turn off the patch guard for the run, or for one test. The guard fails a test that is not `lanes_exclusive` when it patches process-wide state through `mock.patch`/pytest-mock/`monkeypatch` (a module or class attribute, a dotted path, the environment, `chdir`, `sys.path`); patches of instances and in session-scoped fixtures are allowed |
 | ini `lanes_interrupt_grace` | Seconds to wait after Ctrl-C for the interrupted lanes to run their teardown (default 30). A second Ctrl-C stops waiting |
 | `--lanes-xdist-node-hooks` + ini `lanes_node_hook_plugins` | Single-process mode: fire xdist's `pytest_testnodeready` / `testnodedown` for each lane, but only to the named plugins (default `conftest`) |
 
@@ -77,6 +78,7 @@ Each lane is its own xdist worker: `worker_id`, `testrun_uid`, `xdist.get_xdist_
 ### What you must know before pointing it at a real suite
 
 Lanes are threads, so anything process-global is shared between concurrently running tests. That includes `mock.patch`, monkeypatching shared modules, `os.environ`, `chdir`, signals, logging levels, `random.seed`, `socket.setdefaulttimeout` and `locale.setlocale`. Mark such tests `lanes_exclusive`, or fix them; `pytest --lanes-detect` (below) finds them. Handled for you:
+- A `mock.patch`, pytest-mock or `monkeypatch` patch of shared state in a test that is not `lanes_exclusive` fails the test and says what to do (the patch guard; see `--lanes-allow-patches`).
 - `contextlib.redirect_stdout`/`redirect_stderr` redirect only the lane that entered them.
 - Replacing `sys.stdout` directly, as click's `CliRunner` does, cannot be made per lane: the run fails and names the tests. Mark them `lanes_exclusive`.
 - A test reading stdin fails at once, as under pytest's capture.

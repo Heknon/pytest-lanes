@@ -122,17 +122,24 @@ class LaneRunner:
                     or fixtures & set(getattr(item, "fixturenames", ()))
                     or is_doctest(item))
 
-    @pytest.hookimpl(tryfirst=True)
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
     def pytest_fixture_setup(self, fixturedef, request):
-        """Fail closed when an exclusive fixture is requested only at run time."""
-        if LANE.get() is None or fixturedef.argname not in self.config.getini("lanes_exclusive_fixtures"):
-            return None
-        if not self.is_exclusive(request.node):
+        """Fail closed when an exclusive fixture is requested only at run time; and note
+        the scope of the fixture being set up, for the patch guard (isolation.py, P14)."""
+        lane = LANE.get()
+        if lane is None:
+            return (yield)
+        if fixturedef.argname in self.config.getini("lanes_exclusive_fixtures") \
+                and not self.is_exclusive(request.node):
             pytest.fail(f"pytest-lanes: {fixturedef.argname!r} was requested at run time "
                         f"(getfixturevalue), so this test was not scheduled to run alone and "
                         f"would capture other lanes' output. Add it to the test's arguments "
                         f"or mark the test @pytest.mark.lanes_exclusive.", pytrace=False)
-        return None
+        lane.fixture_scopes.append(getattr(fixturedef, "scope", "function"))
+        try:
+            return (yield)
+        finally:
+            lane.fixture_scopes.pop()
 
     def start(self, node: ThreadNode, items) -> threading.Thread:
         def run():

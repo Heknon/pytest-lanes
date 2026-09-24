@@ -59,6 +59,7 @@ class ThreadNode:
         # Execution-facing: what a worker process would own.
         self.setupstate = setupstate
         self.fixture_state: dict = {}
+        self.fixture_scopes: list = []  # scopes of the fixtures being set up now (patch guard)
         self.out = io.StringIO()
         self.err = io.StringIO()
         # contextlib.redirect_stdout/stderr targets entered on this lane, innermost last

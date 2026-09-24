@@ -13,6 +13,8 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P11 ``_pytest.recwarn.WarningsRecorder.__enter__``: fail closed on pytest.warns
   before Python 3.14 (warning state is process-wide there).
 * P12 ``Cache.get``/``Cache.set``: serialized, so a concurrent read never sees a half-written value.
+* P14 ``unittest.mock._patch.__enter__`` / ``_patch_dict._patch_dict`` and ``pytest.MonkeyPatch``:
+  fail closed on a process-wide patch in a test that is not exclusive.
 * P3 and P8 (logging) live in ``capture.py``; C1 (third-party plugins) in ``compat.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
@@ -26,7 +28,10 @@ import functools
 import os
 import sys
 import threading
+import types
 from dataclasses import dataclass
+
+import pytest
 
 from .capture import (
     clone_log_handlers,
@@ -343,6 +348,140 @@ class LaneStateFactory:
         return clone_log_handlers(self.log_templates)
 
 
+# ------------------------------------------------------------------ P14: process-wide patches
+PATCH_GUARD_MESSAGE = (
+    "pytest-lanes: {what} patches process-wide state: every test running on another lane "
+    "sees it until it is undone. Mark this test @pytest.mark.lanes_exclusive (it then runs "
+    "alone), or, if nothing another test runs uses what it patches, "
+    "@pytest.mark.lanes_allow_patches. --lanes-allow-patches turns this check off.")
+
+
+def check_p14():
+    """Probe: unittest.mock's patchers still look as ``guard_process_patches`` expects."""
+    from unittest import mock
+
+    patch_cls, dict_cls = getattr(mock, "_patch", None), getattr(mock, "_patch_dict", None)
+    if patch_cls is None or "__enter__" not in vars(patch_cls):
+        return "P14 unittest.mock._patch.__enter__"
+    if dict_cls is None or not callable(vars(dict_cls).get("_patch_dict")):
+        return "P14 unittest.mock._patch_dict._patch_dict"
+    probe = mock.patch("os.sep")
+    if not (callable(getattr(probe, "getter", None)) and getattr(probe, "attribute", None) == "sep"):
+        return "P14 unittest.mock._patch.getter/.attribute"
+    if not hasattr(mock.patch.dict({}), "in_dict"):
+        return "P14 unittest.mock._patch_dict.in_dict"
+    return None
+
+
+def _shared(target) -> bool:
+    """A module or a class is shared by every lane; an instance is presumed the test's own."""
+    return isinstance(target, (types.ModuleType, type))
+
+
+def _shared_mapping(mapping) -> bool:
+    return mapping is os.environ or mapping is sys.modules or isinstance(mapping, str)
+
+
+@contextlib.contextmanager
+def guard_process_patches(config, is_exclusive):
+    """P14: a process-wide patch in a test that is not exclusive fails at once.
+
+    Covers ``unittest.mock`` (so pytest-mock) and ``pytest.MonkeyPatch``: a patch of a
+    module or class attribute (or by dotted path), of ``os.environ``/``sys.modules``,
+    and ``chdir``/``syspath_prepend``. Not guarded: patches of instances (presumed the
+    test's own), patches made while a session-scoped fixture is set up (one value for
+    the whole run), exclusive tests, ``lanes_allow_patches`` tests, and processes with
+    one lane. Direct assignments (``os.environ[k] = v``) cannot be seen: ``--lanes-detect``.
+    """
+    if config.getoption("lanes_allow_patches") or config.getini("lanes_allow_patches") \
+            or (config.getoption("lanes") or 0) <= 1:
+        yield
+        return
+
+    from unittest import mock
+
+    def check(what: str) -> None:
+        lane = LANE.get()
+        if lane is None:
+            return
+        item = lane.current_item
+        if item is None or is_exclusive(item) or item.get_closest_marker("lanes_allow_patches"):
+            return
+        if lane.fixture_scopes and lane.fixture_scopes[-1] == "session":
+            return
+        pytest.fail(PATCH_GUARD_MESSAGE.format(what=what), pytrace=False)
+
+    notset = object()
+    originals = []
+
+    def install(owner, name, make):
+        original = vars(owner)[name]
+        originals.append((owner, name, original))
+        setattr(owner, name, make(original))
+
+    def mock_enter(original):
+        def __enter__(self):
+            target = self.getter()
+            if _shared(target):
+                check(f"mock.patch of {getattr(target, '__name__', '?')}.{self.attribute}")
+            return original(self)
+        return __enter__
+
+    def mock_patch_dict(original):
+        def _patch_dict(self):
+            if _shared_mapping(self.in_dict):
+                name = self.in_dict if isinstance(self.in_dict, str) else \
+                    ("os.environ" if self.in_dict is os.environ else "sys.modules")
+                check(f"mock.patch.dict of {name}")
+            return original(self)
+        return _patch_dict
+
+    def mp_attr(verb):
+        def make(original):
+            def method(self, target, name=notset, *args, **kwargs):
+                if isinstance(target, str):        # a dotted path: always a global
+                    check(f"monkeypatch.{verb}({target!r})")
+                elif _shared(target):
+                    check(f"monkeypatch.{verb} of {getattr(target, '__name__', '?')}.{name}")
+                return original(self, target, *((name,) if name is not notset else ()), *args, **kwargs)
+            return method
+        return make
+
+    def mp_item(verb):
+        def make(original):
+            def method(self, dic, name, *args, **kwargs):
+                if dic is os.environ or dic is sys.modules:
+                    check(f"monkeypatch.{verb} of {'os.environ' if dic is os.environ else 'sys.modules'}")
+                return original(self, dic, name, *args, **kwargs)
+            return method
+        return make
+
+    def mp_always(label):
+        def make(original):
+            def method(self, *args, **kwargs):
+                check(label)
+                return original(self, *args, **kwargs)
+            return method
+        return make
+
+    mp = pytest.MonkeyPatch
+    install(mock._patch, "__enter__", mock_enter)
+    install(mock._patch_dict, "_patch_dict", mock_patch_dict)
+    install(mp, "setattr", mp_attr("setattr"))
+    install(mp, "delattr", mp_attr("delattr"))
+    install(mp, "setitem", mp_item("setitem"))
+    install(mp, "delitem", mp_item("delitem"))
+    install(mp, "setenv", mp_always("monkeypatch.setenv"))
+    install(mp, "delenv", mp_always("monkeypatch.delenv"))
+    install(mp, "chdir", mp_always("monkeypatch.chdir"))
+    install(mp, "syspath_prepend", mp_always("monkeypatch.syspath_prepend"))
+    try:
+        yield
+    finally:
+        for owner, name, original in reversed(originals):
+            setattr(owner, name, original)
+
+
 # ------------------------------------------------------------------ P12: config.cache
 CACHE_METHODS = ("get", "set")
 
@@ -385,6 +524,7 @@ def isolate_lanes(config, session, is_exclusive):
         stack.enter_context(race_free_current_test_var())                # P6
         stack.enter_context(per_lane_worker_identity(config))            # P10
         stack.enter_context(guard_warnings_recorder(is_exclusive))       # P11
+        stack.enter_context(guard_process_patches(config, is_exclusive))  # P14
         stack.enter_context(per_lane_basetemp(config))                   # P7
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3

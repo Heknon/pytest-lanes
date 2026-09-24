@@ -48,7 +48,7 @@ The package is split by responsibility. Read `plugin.py`'s docstring first: it h
 | `worker.py` | `HybridWorkerSession` (a worker of `-n P --lanes M`): takes over xdist's worker loop and channel | X2 |
 | `controller.py` | `LanesController`, `LaneMux`, `LaneProxy` (controller of `-n P --lanes M`): presents P real workers to xdist's DSession and P×M virtual lanes to the scheduler. Passes the controller's `-X context_aware_warnings`/`thread_inherit_context` to the workers through the environment (xdist starts workers without `-X` options) | X3, X4 |
 | `scheduling.py` | `make_scheduler` (via xdist's own factory hook), the scheduler protocol check, the loadgroup `@group` suffix | X1, P5 |
-| `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all | P1, P2, P6, P7, P10, P11, P12 |
+| `isolation.py` | Per-lane pytest state, one context manager per touchpoint, and `isolate_lanes()` that installs them all. The patch guard (`guard_process_patches`) | P1, P2, P6, P7, P10, P11, P12, P14 |
 | `capture.py` | Per-lane stdout/stderr and logging; per-lane `contextlib.redirect_stdout`/`redirect_stderr`; `sys.stdin` that fails a read as pytest's capture does; logging's logger registry made safe to iterate | P3, P8, P13 |
 | `hookrouting.py` | `ControllerHookRouter`: the 4 controller hooks queued on lanes and replayed on the main thread | P4 |
 | `compat.py` | Shims for third-party plugins that assume one test at a time per process | C1 |
@@ -63,7 +63,7 @@ Mode selection in `pytest_configure`:
 
 Other files:
 
-- `tests/` is the spec: pytester subprocess tests (about 150) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes), `test_isolation.py` (output, logging, basetemp, worker identity, warnings) and `test_integrity.py` (the integrity check, and a canary suite under maximum thread-switching pressure). Shared helpers live in `tests/lanes_testing.py`.
+- `tests/` is the spec: pytester subprocess tests (about 190) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes), `test_isolation.py` (output, logging, basetemp, worker identity, warnings) `test_integrity.py` (the integrity check, and a canary suite under maximum thread-switching pressure), `test_patch_guard.py` (P14) and `test_detector.py` (`--lanes-detect`). Shared helpers live in `tests/lanes_testing.py`.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is a draft CI workflow, manual-only (`workflow_dispatch`): GitHub runners are paid.
@@ -87,6 +87,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 | P11 | `_pytest.recwarn.WarningsRecorder.__enter__` | Without context-aware warnings (Python < 3.14), `pytest.warns`/`deprecated_call`/`recwarn` swap process-wide warning state (5 of 6 concurrent blocks failed). A non-exclusive test entering one fails with instructions to mark it `lanes_exclusive`. Not installed when warnings are context-aware |
 | P12 | `_pytest.cacheprovider.Cache.get` / `.set` | Serialized by one process-wide lock: pytest writes a value by truncating the file and then writing it, so a lane reading concurrently got the default (45 of 200 get-after-set tests failed) |
 | P13 | stdlib `contextlib._RedirectStream.__enter__` / `__exit__` (`._stream`, `._new_target`) | `redirect_stdout`/`redirect_stderr` entered on a lane push the target on that lane's own stack instead of replacing `sys.stdout` for the process, which captured every other lane's prints (4 of 4 redirecting tests failed). Only while lanes capture (not with `-s`) |
+| P14 | stdlib `unittest.mock._patch.__enter__` (`.getter`, `.attribute`), `_patch_dict._patch_dict` (`.in_dict`); public `pytest.MonkeyPatch` methods | The patch guard: in a test that is not exclusive, a patch of a module or class attribute (or by dotted path), of `os.environ`/`sys.modules`, `setenv`/`delenv`, `chdir` or `syspath_prepend` fails the test with instructions. Instances, session-scoped fixtures, `lanes_exclusive` and `lanes_allow_patches` tests, and processes with one lane are exempt; `--lanes-allow-patches` / ini `lanes_allow_patches` turn it off |
 | C1 | pytest-rerunfailures ≥ 15: `config.failures_db` (`ClientStatusDB`) | A hybrid worker's lanes shared its one socket to the controller; interleaved request/response pairs killed a lane with `ValueError`. Its socket methods (`_get`, `_set`, `increment_suite_reruns`) are serialized |
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `numnodes`. Probed on each scheduler instance, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails |
@@ -98,7 +99,7 @@ All are probed at startup (`probes.py`) except P1 and P5, which only the contrac
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
-.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~150 tests, ~50s
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~190 tests, ~80s
 scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
@@ -128,7 +129,7 @@ Required flags and environment:
 
 These are not bugs to "fix" by weakening the invariants.
 
-- **Process-global state** in user tests and infrastructure: `mock.patch`, monkeypatch on shared modules, `os.environ`, `chdir`, signals.
+- **Process-global state** in user tests and infrastructure: `mock.patch`, monkeypatch on shared modules, `os.environ`, `chdir`, signals. Patches through `mock`/pytest-mock/`monkeypatch` fail closed (P14, opt-out `--lanes-allow-patches`); direct assignments (`os.environ[k] = v`, `module.attr = x`) cannot be seen at run time: `--lanes-detect` finds them.
 - **Warnings** before Python 3.14.
 - **Child-thread output attribution** before Python 3.14.
 - **Unkillable hung threads.**
