@@ -12,6 +12,11 @@ and capture per lane instead:
   lane's output only (P13): the target goes on the lane's own stack, which its
   ``_LaneStream`` writes to, instead of replacing ``sys.stdout`` for every lane.
   Swapping it for the process captured every other lane's prints too.
+* ``CaptureManager.suspend_global_capture``/``resume_global_capture`` on a lane also
+  suspend/resume the running test's capture fixture (P15). Plugins write to the
+  terminal between the two (``--setup-show`` does); in plain pytest that bypasses
+  a capfd fixture as a side effect of suspending global capture, which lanes turn
+  off, so the line went into the test's capfd.
 * ``sys.stdin`` becomes ``_NoStdin``, which fails a read at once, as pytest's
   capture does. Without it, a lane reading stdin blocked on the terminal forever.
   Left alone with ``-s``, as by pytest.
@@ -43,26 +48,52 @@ class _LaneStream(io.TextIOBase):
         self._attr = attr  # "out" or "err": the ThreadNode buffer to write to
         self._binary = _LaneBinaryStream(self)
 
+    def _redirect(self):
+        """(True, target) inside this lane's innermost redirect, else (False, None)."""
+        lane = LANE.get()
+        if lane is not None and lane.redirects[self._attr]:
+            return True, lane.redirects[self._attr][-1]
+        return False, None
+
     def write(self, s):
         lane = LANE.get()
         if lane is None:
             return self._real.write(s)
-        redirects = lane.redirects[self._attr]
-        if redirects:
-            return redirects[-1].write(s)
+        redirected, target = self._redirect()
+        if redirected:                       # redirect_stdout(None) discards, as print() does
+            return len(s) if target is None else target.write(s)
         return getattr(lane, self._attr).write(s)
 
     def flush(self):
-        lane = LANE.get()
-        if lane is not None and lane.redirects[self._attr]:
-            return lane.redirects[self._attr][-1].flush()
+        redirected, target = self._redirect()
+        if redirected:
+            return None if target is None else target.flush()
         self._real.flush()
+
+    # Inside a redirect, sys.stdout stands for the target (subprocess(stdout=sys.stdout),
+    # sys.stdout.getvalue()): io.TextIOBase defines these, so __getattr__ never sees them.
+    def fileno(self):
+        redirected, target = self._redirect()
+        if redirected:
+            if target is None:
+                raise io.UnsupportedOperation("fileno")
+            return target.fileno()
+        return self._real.fileno()
+
+    def isatty(self):
+        redirected, target = self._redirect()
+        if redirected:
+            return bool(target is not None and target.isatty())
+        return self._real.isatty()
 
     @property
     def buffer(self):
         return self._binary
 
     def __getattr__(self, name):
+        redirected, target = self._redirect()
+        if redirected and target is not None:
+            return getattr(target, name)
         return getattr(self._real, name)
 
 
@@ -80,6 +111,8 @@ class _LaneBinaryStream:
         redirects = lane.redirects[self._text._attr]
         if redirects:
             target = redirects[-1]
+            if target is None:
+                return len(b)
             if hasattr(target, "buffer"):
                 return target.buffer.write(b)
             target.write(bytes(b).decode(getattr(target, "encoding", None) or encoding, "replace"))
@@ -177,6 +210,57 @@ def per_lane_redirects():
         yield
     finally:
         base.__enter__, base.__exit__ = enter, exit_
+
+
+# ------------------------------------------------------------------ P15: suspend capture
+def check_p15(config):
+    """Probe: CaptureManager still has what ``fixture_follows_global_suspend`` uses."""
+    capman = config.pluginmanager.get_plugin("capturemanager")
+    if capman is None:
+        return None
+    cls = type(capman)
+    if not all(callable(vars(cls).get(n)) for n in ("suspend_global_capture", "resume_global_capture",
+                                                     "suspend_fixture", "resume_fixture")):
+        return "P15 CaptureManager.suspend/resume_global_capture, suspend/resume_fixture"
+    if "_capture_fixture" not in vars(capman):
+        return "P15 CaptureManager._capture_fixture"
+    return None
+
+
+@contextlib.contextmanager
+def fixture_follows_global_suspend(config):
+    """P15: on a lane, suspending global capture suspends the test's capture fixture too."""
+    capman = config.pluginmanager.get_plugin("capturemanager")
+    if capman is None:
+        yield
+        return
+    cls = type(capman)
+    suspend, resume = vars(cls)["suspend_global_capture"], vars(cls)["resume_global_capture"]
+
+    def fixture_started(self) -> bool:
+        fixture = self._capture_fixture
+        return fixture is not None and fixture._is_started()
+
+    def suspend_global_capture(self, in_=False):
+        if LANE.get() is not None and fixture_started(self):
+            self.suspend_fixture()
+            self.__dict__.setdefault("_lanes_suspended", []).append(self._capture_fixture)
+        return suspend(self, in_)
+
+    def resume_global_capture(self):
+        result = resume(self)
+        suspended = self.__dict__.get("_lanes_suspended")
+        if LANE.get() is not None and suspended:
+            fixture = suspended.pop()
+            if fixture is self._capture_fixture:
+                self.resume_fixture()
+        return result
+
+    cls.suspend_global_capture, cls.resume_global_capture = suspend_global_capture, resume_global_capture
+    try:
+        yield
+    finally:
+        cls.suspend_global_capture, cls.resume_global_capture = suspend, resume
 
 
 @contextlib.contextmanager

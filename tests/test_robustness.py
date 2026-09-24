@@ -378,3 +378,64 @@ def test_ctrl_c_abandons_a_lane_blocked_past_the_grace_period(pytester):
     assert code == pytest.ExitCode.INTERRUPTED, out
     assert took < 30, took
     assert "test_long[0]" in out and "without teardown" in out, out
+
+
+
+def test_ctrl_c_while_the_main_thread_handles_a_finished_test(pytester):
+    # Ctrl-C while the main thread handled a lane's "item done" left that lane waiting
+    # for an acknowledgement forever: the run waited out the grace period, and the
+    # lane's fixtures were never torn down (round-5 review).
+    import os
+    import subprocess
+    import time
+    pytester.makeini("[pytest]\nlanes_interrupt_grace = 4\n")
+    pytester.makeconftest("""
+        import os, signal, threading, time, pytest
+        def pytest_runtest_logreport(report):   # a slow reporter, on the main thread
+            if "test_excl" in report.nodeid and report.when == "call":
+                threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+                time.sleep(1)
+        @pytest.fixture(scope="module")
+        def res():
+            yield
+            with open(os.environ["LANES_OUT"] + "/teardown.log", "a") as f:
+                f.write("module teardown ran\\n")
+    """)
+    pytester.makepyfile("""
+        import time, pytest
+        @pytest.fixture
+        def slow_td():
+            yield
+            time.sleep(0.5)
+        @pytest.mark.lanes_exclusive
+        def test_excl(res, slow_td):
+            pass
+        @pytest.mark.lanes_exclusive
+        def test_excl2(res):
+            pass
+    """)
+    env = {**os.environ, "LANES_OUT": str(pytester.path)}
+    started = time.monotonic()
+    p = subprocess.run([sys.executable, "-m", "pytest", *BASE, "--lanes", "2"], cwd=pytester.path,
+                       env=env, capture_output=True, text=True, timeout=60)
+    took = time.monotonic() - started
+    assert p.returncode == pytest.ExitCode.INTERRUPTED, p.stdout
+    assert took < 3.5, (took, p.stdout)
+    assert (pytester.path / "teardown.log").exists(), p.stdout
+
+
+def test_keyboard_interrupt_raised_by_a_test_stops_the_run(pytester):
+    # Only the raising lane stopped: the other ran everything else, and tests queued to
+    # the stopped lane silently never ran (round-5 review). xdist stops the run:
+    # "1 failed, 2 passed", Interrupted.
+    pytester.makepyfile("""
+        import time, pytest
+        def test_a_ki():
+            raise KeyboardInterrupt
+        @pytest.mark.parametrize("i", range(6))
+        def test_b(i):
+            time.sleep(0.5)
+    """)
+    r = run(pytester, "--lanes", "2", timeout=60)
+    assert r.ret == pytest.ExitCode.INTERRUPTED, r.stdout.str()
+    assert r.parseoutcomes().get("passed", 0) <= 2, r.stdout.str()

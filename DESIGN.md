@@ -67,6 +67,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P12 | `_pytest.cacheprovider.Cache.get` / `.set` | Serialized per process: a concurrent read saw a half-written value |
 | P13 | stdlib `contextlib._RedirectStream.__enter__` / `__exit__` | `redirect_stdout`/`redirect_stderr` redirect only the lane that entered them |
 | P14 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict`; `pytest.MonkeyPatch` | The patch guard: a process-wide patch in a test that is not exclusive fails at once |
+| P15 | `CaptureManager.suspend_global_capture` / `resume_global_capture` | On a lane they also suspend the test's capture fixture, so a plugin's terminal output (`--setup-show`) is not captured by the test's capfd |
 | D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` / `_unpatch_dict`, `contextlib._RedirectStream` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
 
 ## Verified
@@ -128,11 +129,30 @@ A harness (`plain`, `-n 2`, `--lanes 3`, `-n 2 --lanes 2`; outcomes, exit codes 
 7. **`--setup-show`/`--setup-only` raised AttributeError on 3.14t (P2).** pytest's setuponly plugin keeps the fixture's param on the shared FixtureDef (`cached_param`) and deletes it on finalization; one lane deleted it while another printed it (3 of 5 runs). Found by repeating the suite on 3.14t; it is now a per-lane attribute.
 8. **An exclusive `capfd` test captured the main thread's output.** capfd redirects fd 1/2 for the process during each phase. The main thread meanwhile replayed that test's earlier reports, so the terminal reporter's `PASSED` (or any plugin's output) went into capfd: the test's `readouterr()` got it and the terminal lost it (4 of 15 runs on 3.14t, first seen as an intermittent failure of `test_capfd_routed_to_serial_phase`). An exclusive test's hook calls are now held, in order, and replayed when it is done.
 
-**Patch guard (P14), added on request after round 4.** `mock.patch`/pytest-mock/`monkeypatch` broke concurrent tests silently (3 of 4 `mocker` tests failed; others can pass for the wrong reason). Like pytest.warns before 3.14 (P11), a test that is not exclusive now fails at the patch, with instructions, when it patches a module or class attribute (or a dotted path), `os.environ` or `sys.modules`, or calls `setenv`/`delenv`/`chdir`/`syspath_prepend`. Exempt: patches of instances (presumed the test's own), patches made while a session-scoped fixture is set up (one value for the whole run), `lanes_exclusive` tests (which run alone, pausing their process), tests marked `lanes_allow_patches` (the patched thing is used by nothing else), and processes with one lane. `--lanes-allow-patches` or ini `lanes_allow_patches` turns it off. Direct assignments cannot be intercepted; `--lanes-detect` reports them. `tests/test_patch_guard.py` covers 11 unsafe and 5 safe patterns, every opt-out, and the unguarded modes.
+**Patch guard (P14), added on request after round 4.** `mock.patch`/pytest-mock/`monkeypatch` broke concurrent tests silently (3 of 4 `mocker` tests failed; others can pass for the wrong reason). Like pytest.warns before 3.14 (P11), a test that is not exclusive now fails at the patch, with instructions, when it patches a module or class attribute (or anything by dotted path), `os.environ` or `sys.modules`, or calls `setenv`/`delenv`/`chdir`/`syspath_prepend`, including from session-scoped fixtures (round 5). Exempt: patches of instances and of classes defined in a function (presumed the test's own), pytest's own patches, `lanes_exclusive` tests (which run alone, pausing their process), tests marked `lanes_allow_patches` (the patched thing is used by nothing else), and processes with one lane. `--lanes-allow-patches` or ini `lanes_allow_patches` turns it off. Direct assignments cannot be intercepted; `--lanes-detect` reports them. `tests/test_patch_guard.py` covers 11 unsafe and 5 safe patterns, every opt-out, and the unguarded modes.
 
 Also found, and not bugs of lanes:
 - `mock.patch`/`mocker.patch` of shared objects, `random.seed`, `socket.setdefaulttimeout` broke concurrent tests, as expected of process-wide state (F1). `--lanes-detect` now records the stdlib's process-wide setters (`random.seed`, `socket.setdefaulttimeout`, `locale.setlocale`, `os.umask`, `time.tzset`, `sys.setrecursionlimit`, `logging.disable`, `gc.*`, `signal.signal`) and `sys.stdout`/`stderr`/`stdin` swaps.
 - Differences from xdist that are expected: a session fixture's teardown error is reported once per lane (once per worker under xdist); `pytest.exit(returncode=N)` keeps its code in single-process lanes (xdist turns it into an INTERNALERROR); `--sw`/`-x` stop at a different point, as xdist's do; a pytest-timeout in hybrid mode kills the worker (F13).
+
+### Round 5: review and challenge cycles
+
+An independent adversarial review of round 4, and a chaos suite on 3.14t (48 lanes, and 2 × 24: per-lane redirects, exclusive capfd tests, cache, `--setup-show`, reruns, instance patches, repeated 10 times per mode), found twelve defects. Each got a test first:
+
+1. **Session-scoped patches were exempt from the patch guard, wrongly.** Each lane has its own session fixture; the first lane to finish undoes the patch for the lanes still running (KeyError in the chaos run). Guarded now, with a message pointing to `pytest_configure`.
+2. **`--setup-show` output went into an exclusive test's capfd (P15).** In plain pytest, suspending global capture bypasses the fixture capture as a side effect; with global capture off, it did not.
+3. **Hybrid: an exclusive test started while the main thread still replayed a neighbour's reports**, whose output (a progress dot) its capfd captured. A lane now keeps its share of the exclusivity lock until its reports are replayed.
+4. **Ctrl-C while the main thread handled a finished item** left that lane waiting for an acknowledgement: the run waited out the grace period and skipped teardown. The acknowledgement is now always sent.
+5. **A test raising `KeyboardInterrupt` stopped only its lane**; the others ran on, and the stopped lane's queued tests never ran. It now interrupts the run like Ctrl-C (exit 2), and any lane error stops the other lanes at once.
+6. **`contextlib.redirect_stdout(None)` crashed** (the stdlib's "discard" idiom); it discards.
+7. **Inside a per-lane redirect, `sys.stdout` did not act as the target**: `fileno()` raised (so `subprocess.run(stdout=sys.stdout)` failed) and `getvalue()` was missing. `fileno`, `isatty` and other attributes now come from the target.
+8. **The patch guard failed every test when pytest itself patches** (its unittest plugin patches twisted's `Failure.__init__` around each item): pytest's own patches are exempt.
+9. **`mock.patch("pkg.settings_obj.attr")` was not guarded** (the target is an instance), while the `monkeypatch` equivalent was; any dotted-path patch is now guarded. Classes defined inside a test are no longer flagged.
+10. **`StdioWatch` counted lanes waiting for the exclusivity lock as running**, so a lone stdout swap failed the run. A lane's current test is now set once it holds the lock.
+11. **Its message was wrong with `-s`**, where `redirect_stdout` is process-wide; it now says so.
+12. **The hybrid controller changed the environment before its checks**, which could leave it changed if a check refused.
+
+Not a lanes defect: concurrent `config.cache` get/set across processes loses values under plain xdist too (6–9 of 300 with `-n 4`); an upstream candidate.
 
 ### Silent corruption is made loud
 

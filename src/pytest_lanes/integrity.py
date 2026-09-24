@@ -46,7 +46,8 @@ class StdioWatch:
     INTERVAL = 0.002
     NAMES = ("stdout", "stderr", "stdin")
 
-    def __init__(self, ledger, nodes, exclusive_active) -> None:
+    def __init__(self, ledger, nodes, exclusive_active, *, redirects_per_lane: bool = True) -> None:
+        self._redirects_per_lane = redirects_per_lane
         self._ledger = ledger
         self._nodes = nodes                        # the list of lanes, filled as they start
         self._exclusive_active = exclusive_active  # () -> bool
@@ -79,13 +80,15 @@ class StdioWatch:
             if key in self._reported:
                 continue
             self._reported.add(key)
+            redirect = (f"contextlib.redirect_{name} is per lane already." if self._redirects_per_lane
+                        else f"with -s, contextlib.redirect_{name} replaces it for the whole process "
+                             f"too: mark those tests lanes_exclusive, or run without -s.")
             self._ledger._violation(
                 f"sys.{name} was replaced (by {type(getattr(sys, name)).__name__}) while these tests "
                 f"ran on concurrent lanes: {', '.join(running[:8])}"
                 f"{' ...' if len(running) > 8 else ''}. The other lanes' {name} went to the "
                 f"replacement. Mark the test that replaces it (click's CliRunner, a direct "
-                f"assignment) @pytest.mark.lanes_exclusive; contextlib.redirect_{name} is per "
-                f"lane already.")
+                f"assignment) @pytest.mark.lanes_exclusive; {redirect}")
 
 
 def _nodeid(name: str, kwargs: dict):

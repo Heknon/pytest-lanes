@@ -389,3 +389,80 @@ def test_exclusive_capfd_test_does_not_capture_the_reporters(pytester, fixture):
     r = run(pytester, "--lanes", "2", "-v", timeout=60)
     r.assert_outcomes(passed=1)
     assert "REPORT-SEEN" in r.stdout.str(), r.stdout.str()
+
+
+@pytest.mark.parametrize("fixture", ["capfd", "capsys"])
+@pytest.mark.parametrize("name", MODES.keys())
+def test_setup_show_output_is_not_captured_by_the_test(pytester, name, fixture):
+    # Plugins write to the terminal between capman.suspend_global_capture() and
+    # resume_global_capture() (--setup-show does). In plain pytest suspending global
+    # capture also bypasses a capfd/capsys fixture; lanes turn global capture off, so
+    # the line went into the test's capture and its readouterr() failed (found by the
+    # round-5 chaos run). On a lane, the fixture capture is now suspended with it (P15).
+    pytester.makepyfile(f"""
+        import os, sys
+        def test_it({fixture}):
+            os.write(1, b"raw") if "{fixture}" == "capfd" else sys.stdout.write("raw")
+            assert {fixture}.readouterr().out == "raw"
+    """)
+    result = run(pytester, *MODES[name], "--setup-show", timeout=60)
+    result.assert_outcomes(passed=1)
+
+
+def test_exclusive_test_starts_after_earlier_reports_are_replayed(pytester):
+    # Hybrid mode runs exclusive tests between others. A lane released its share of the
+    # exclusivity lock when its test ended, before the main thread replayed its reports;
+    # the exclusive capfd test then captured that replay's output (a worker's progress
+    # dot, found by the round-5 chaos run). Lanes now keep the lock until replayed.
+    pytester.makeconftest("""
+        import os, time
+        def pytest_runtest_logreport(report):   # runs where reports are replayed
+            if report.when == "call" and "test_normal" in report.nodeid:
+                time.sleep(0.3)
+                os.write(1, b"OTHER")
+    """)
+    pytester.makepyfile("""
+        import os, time
+        def test_normal():
+            pass
+        def test_exclusive(capfd):
+            time.sleep(0.6)
+            os.write(1, b"raw")
+            assert capfd.readouterr().out == "raw"
+    """)
+    run(pytester, "-n", "1", "--lanes", "2", timeout=60).assert_outcomes(passed=2)
+
+
+
+# ---------------------------------------------------------------- redirect edge cases (round-5 review)
+def test_redirect_stdout_to_none_discards(pytester):
+    # redirect_stdout(None) is the stdlib idiom for "discard"; lanes wrote to None.
+    pytester.makepyfile("""
+        import contextlib, sys
+        def test_it():
+            with contextlib.redirect_stdout(None):
+                print("gone")
+                sys.stdout.write("gone")
+                sys.stdout.flush()
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)
+
+
+@pytest.mark.parametrize("name", MODES.keys())
+def test_sys_stdout_inside_a_redirect_is_the_target(pytester, name):
+    # Inside a per-lane redirect sys.stdout stayed the lane stream: fileno() raised and
+    # getvalue() was missing, so subprocess(stdout=sys.stdout) and similar code broke.
+    pytester.makepyfile("""
+        import contextlib, io, subprocess, sys
+        def test_file(tmp_path):
+            path = tmp_path / "out.txt"
+            with open(path, "w") as f, contextlib.redirect_stdout(f):
+                sys.stdout.flush()
+                subprocess.run([sys.executable, "-c", "print('child')"], stdout=sys.stdout, check=True)
+            assert path.read_text() == "child\\n"
+        def test_stringio():
+            with contextlib.redirect_stdout(io.StringIO()):
+                print("x")
+                assert sys.stdout.getvalue() == "x\\n"
+    """)
+    run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=2)

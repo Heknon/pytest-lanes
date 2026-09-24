@@ -5,13 +5,15 @@ on one, environment variables, ``chdir`` and ``sys.path`` are seen by every test
 running meanwhile: they broke concurrent tests silently (round 4: 3 of 4 mocker tests
 failed, others passed for the wrong reason). Like pytest.warns before 3.14 (P11), such
 a test now fails with instructions, unless it is ``lanes_exclusive``, marked
-``lanes_allow_patches``, or the run passes ``--lanes-allow-patches``.
+``lanes_allow_patches``, or the run passes ``--lanes-allow-patches``. Session-scoped
+fixtures are guarded too: each lane tears its own down when it finishes, undoing the
+patch for lanes still running.
 """
 import pytest
 from lanes_testing import MODES, run
 
 LANE_MODES = {"lanes": MODES["lanes"], "hybrid": MODES["hybrid"]}
-GUARD_MESSAGE = "*patches process-wide state*lanes_exclusive*"
+GUARD_MESSAGE = "*patches process-wide state*"
 
 UNSAFE = {
     "mock_patch_string": """
@@ -67,6 +69,26 @@ UNSAFE = {
         def test_it(monkeypatch):
             monkeypatch.setitem(os.environ, "LANES_X", "1")
     """,
+    # Each lane has its own session fixture: the first lane to finish tears it down and
+    # undoes the variable for the whole process while other lanes still read it
+    # (KeyError in the round-5 chaos run).
+    "session_fixture_env": """
+        import pytest
+        @pytest.fixture(scope="session", autouse=True)
+        def run_env():
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv("LANES_RUN", "1")
+                yield
+        def test_it():
+            pass
+    """,
+    # The most common form: a settings object reached by dotted path (round-5 review).
+    "mock_patch_dotted_instance": """
+        from unittest import mock
+        def test_it():
+            with mock.patch("appcfg.config.timeout", 99):
+                pass
+    """,
     "function_fixture": """
         import json, pytest
         @pytest.fixture
@@ -78,6 +100,15 @@ UNSAFE = {
 }
 
 SAFE = {
+    "local_class": """
+        from unittest import mock
+        def test_it(monkeypatch):
+            class Local:
+                x = 1
+            with mock.patch.object(Local, "x", 2):
+                assert Local.x == 2
+            monkeypatch.setattr(Local, "x", 3)
+    """,
     "mock_patch_object_instance": """
         from unittest import mock
         class Client:
@@ -107,23 +138,26 @@ SAFE = {
             with mock.patch.dict(d, {"a": 2}):
                 assert d["a"] == 2
     """,
-    "session_fixture_env": """
-        import pytest
-        @pytest.fixture(scope="session", autouse=True)
-        def run_env():
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setenv("LANES_RUN", "1")
-                yield
-        def test_it():
-            import os
-            assert os.environ["LANES_RUN"] == "1"
-    """,
 }
+
+
+def test_session_fixture_patch_message_says_where_to_set_it_instead(pytester):
+    pytester.makepyfile(UNSAFE["session_fixture_env"])
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.stdout.fnmatch_lines(["*session-scoped fixture*pytest_configure*"])
+
+
+APPCFG = """
+class Config:
+    timeout = 1
+config = Config()
+"""
 
 
 @pytest.mark.parametrize("name", LANE_MODES)
 @pytest.mark.parametrize("case", UNSAFE)
 def test_process_wide_patch_fails_the_test(pytester, name, case):
+    pytester.makepyfile(appcfg=APPCFG)
     pytester.makepyfile(UNSAFE[case])
     r = run(pytester, *LANE_MODES[name], timeout=60)
     assert r.ret == pytest.ExitCode.TESTS_FAILED, r.stdout.str()
@@ -172,3 +206,27 @@ def test_mocker_is_guarded(pytester):
     """)
     r = run(pytester, "--lanes", "2", timeout=60)
     r.stdout.fnmatch_lines([GUARD_MESSAGE])
+
+
+def test_pytest_s_own_patches_are_not_guarded(pytester, monkeypatch):
+    # pytest's unittest plugin monkeypatches twisted's Failure.__init__ around every
+    # test once twisted.trial is imported (twisted <= 24): the guard failed every test,
+    # outside its call phase, as an INTERNALERROR (round-5 review). pytest's own patches
+    # are its business.
+    site = pytester.mkdir("site")
+    for path, text in {"twisted/__init__.py": "", "twisted/python/__init__.py": "",
+                       "twisted/python/failure.py": "class Failure:\n    def __init__(self, *a, **k): pass\n",
+                       "twisted/trial/__init__.py": "", "twisted/trial/unittest.py": "class TestCase: pass\n",
+                       "twisted-24.3.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: twisted\nVersion: 24.3.0\n",
+                       "twisted-24.3.0.dist-info/RECORD": ""}.items():
+        (site / path).parent.mkdir(parents=True, exist_ok=True)
+        (site / path).write_text(text)
+    monkeypatch.setenv("PYTHONPATH", str(site))
+    pytester.makepyfile("""
+        import twisted.trial.unittest
+        import pytest
+        @pytest.mark.parametrize("i", range(4))
+        def test_plain(i):
+            pass
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=4)

@@ -84,7 +84,8 @@ class LaneRunner:
         self.hooks = stack.enter_context(ControllerHookRouter(
             self.config.pluginmanager, self.events, session, set_report_node=self.set_report_node,
             ledger=self.ledger))
-        watch = StdioWatch(self.ledger, self.nodes, lambda: self.exclusive_lock.exclusive_active)
+        watch = StdioWatch(self.ledger, self.nodes, lambda: self.exclusive_lock.exclusive_active,
+                           redirects_per_lane=self.config.getoption("capture") != "no")
         watch.start()
         stack.callback(watch.stop)
 
@@ -173,17 +174,20 @@ class LaneRunner:
                 nextitem = None if nxt is SHUTDOWN else items[nxt]
                 start = time.perf_counter()
                 rw = self.exclusive_lock
-                node.current_item = item
-                try:
-                    with (rw.exclusive if self.is_exclusive(item) else rw.shared)():
+                with (rw.exclusive if self.is_exclusive(item) else rw.shared)():
+                    node.current_item = item     # running from here: not while waiting for the lock
+                    try:
                         hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
-                finally:
-                    node.current_item = None
-                # Wait until the main thread has replayed this item's reports and
-                # told the scheduler, so -x/--maxfail stop exactly as a sequential run does.
-                ack = threading.Event()
-                self.events.put(ItemDone(node, index, item.nodeid, time.perf_counter() - start, ack))
-                ack.wait()
+                    finally:
+                        node.current_item = None
+                    # Wait until the main thread has replayed this item's reports and told
+                    # the scheduler, so -x/--maxfail stop exactly as a sequential run does.
+                    # Still holding the lock: an exclusive test (hybrid mode runs them
+                    # between others) must not start while these reports are replayed,
+                    # or its capfd captures what the replay writes.
+                    ack = threading.Event()
+                    self.events.put(ItemDone(node, index, item.nodeid, time.perf_counter() - start, ack))
+                    ack.wait()
                 if self.stopping(session):      # as xdist's worker loop, after each item
                     break
             self._final_teardown(node)
@@ -247,9 +251,11 @@ class LaneRunner:
             try:
                 event = self.events.get(timeout=0.05)
             except queue.Empty:
+                self._check_lane_errors(nodes)
                 if not any(t.is_alive() for t in threads) and self.events.empty():
                     break
                 continue
+            self._check_lane_errors(nodes)
             if isinstance(event, HookCall):
                 node = by_id.get(event.lane)
                 item = node.current_item if node is not None else None
@@ -258,21 +264,39 @@ class LaneRunner:
                 else:
                     self._replay(event, before_replay)
                 continue
-            for call in held.pop(event.node.gateway.id, ()):
-                self._replay(call, before_replay)
-            self.ledger.item_done(event.node.gateway.id, event.nodeid)
-            if on_done is not None:
-                on_done(event.node, event.index, event.duration)
-            if sched is not None:
-                sched.mark_test_complete(event.node, event.index, event.duration)
-                if sched.tests_finished:
-                    for n in nodes:
-                        n.shutdown()
-            if session.shouldfail or session.shouldstop:
-                self.stop.set()
+            try:
+                self._item_done(event, held, sched, session, nodes, on_done, before_replay)
+            finally:                              # even on Ctrl-C: the lane waits for this
+                event.ack.set()
+
+    def _check_lane_errors(self, nodes) -> None:
+        """A lane died: stop the others now, as xdist's controller does on a worker error.
+        A KeyboardInterrupt raised by a test interrupts the run, like Ctrl-C."""
+        if not self.errors:
+            return
+        if any(isinstance(e, KeyboardInterrupt) for e in self.errors):
+            self.errors[:] = [e for e in self.errors if not isinstance(e, KeyboardInterrupt)]
+            raise KeyboardInterrupt
+        if not self.stop.is_set():
+            self.stop.set()
+            for n in nodes:
+                n.shutdown()
+
+    def _item_done(self, event, held, sched, session, nodes, on_done, before_replay) -> None:
+        for call in held.pop(event.node.gateway.id, ()):
+            self._replay(call, before_replay)
+        self.ledger.item_done(event.node.gateway.id, event.nodeid)
+        if on_done is not None:
+            on_done(event.node, event.index, event.duration)
+        if sched is not None:
+            sched.mark_test_complete(event.node, event.index, event.duration)
+            if sched.tests_finished:
                 for n in nodes:
                     n.shutdown()
-            event.ack.set()
+        if session.shouldfail or session.shouldstop:
+            self.stop.set()
+            for n in nodes:
+                n.shutdown()
 
     def _replay(self, call: HookCall, before_replay) -> None:
         self.ledger.replayed(call.lane, call.name, call.kwargs)

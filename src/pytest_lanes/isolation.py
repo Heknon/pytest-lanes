@@ -35,6 +35,7 @@ import pytest
 
 from .capture import (
     clone_log_handlers,
+    fixture_follows_global_suspend,
     per_lane_logging,
     per_lane_std_streams,
     snapshot_logger_dict,
@@ -354,6 +355,12 @@ PATCH_GUARD_MESSAGE = (
     "sees it until it is undone. Mark this test @pytest.mark.lanes_exclusive (it then runs "
     "alone), or, if nothing another test runs uses what it patches, "
     "@pytest.mark.lanes_allow_patches. --lanes-allow-patches turns this check off.")
+PATCH_GUARD_SESSION_MESSAGE = (
+    "pytest-lanes: {what} in a {scope}-scoped fixture patches process-wide state, and each "
+    "lane has its own copy of that fixture: the first lane to finish tears it down and "
+    "undoes the patch while other lanes still run. For a value the whole run needs, set it "
+    "once in pytest_configure or pytest_sessionstart (conftest.py). --lanes-allow-patches "
+    "turns this check off.")
 
 
 def check_p14():
@@ -368,14 +375,34 @@ def check_p14():
     probe = mock.patch("os.sep")
     if not (callable(getattr(probe, "getter", None)) and getattr(probe, "attribute", None) == "sep"):
         return "P14 unittest.mock._patch.getter/.attribute"
+    if not _patch_by_path(probe) or _patch_by_path(mock.patch.object(os, "sep")):
+        return "P14 unittest.mock._patch.getter no longer tells a dotted path from an object"
     if not hasattr(mock.patch.dict({}), "in_dict"):
         return "P14 unittest.mock._patch_dict.in_dict"
     return None
 
 
 def _shared(target) -> bool:
-    """A module or a class is shared by every lane; an instance is presumed the test's own."""
-    return isinstance(target, (types.ModuleType, type))
+    """A module or a class is shared by every lane; an instance, or a class defined
+    inside a function (``<locals>``), is presumed the test's own."""
+    if isinstance(target, types.ModuleType):
+        return True
+    return isinstance(target, type) and "<locals>" not in getattr(target, "__qualname__", "")
+
+
+def _patch_by_path(patcher) -> bool:
+    """``mock.patch("pkg.mod.obj.attr")``: whatever the path reaches is a global."""
+    getter = patcher.getter
+    if isinstance(getter, functools.partial):          # partial(pkgutil.resolve_name, path)
+        return bool(getter.args) and isinstance(getter.args[0], str)
+    cells = getattr(getter, "__closure__", None) or ()  # older: lambda: _importer(path)
+    return any(isinstance(c.cell_contents, str) for c in cells)
+
+
+def _from_pytest(frame) -> bool:
+    """The patch is pytest's own (its unittest plugin patches twisted around each test)."""
+    return str(frame.f_globals.get("__name__", "")).split(".")[0] == "_pytest"
+
 
 
 def _shared_mapping(mapping) -> bool:
@@ -389,9 +416,10 @@ def guard_process_patches(config, is_exclusive):
     Covers ``unittest.mock`` (so pytest-mock) and ``pytest.MonkeyPatch``: a patch of a
     module or class attribute (or by dotted path), of ``os.environ``/``sys.modules``,
     and ``chdir``/``syspath_prepend``. Not guarded: patches of instances (presumed the
-    test's own), patches made while a session-scoped fixture is set up (one value for
-    the whole run), exclusive tests, ``lanes_allow_patches`` tests, and processes with
-    one lane. Direct assignments (``os.environ[k] = v``) cannot be seen: ``--lanes-detect``.
+    test's own), exclusive tests, ``lanes_allow_patches`` tests, and processes with one
+    lane. Patches in session-scoped fixtures are guarded too: each lane tears its own
+    fixture down when it finishes, undoing the patch for lanes still running (seen as a
+    KeyError). Direct assignments (``os.environ[k] = v``) cannot be seen: ``--lanes-detect``.
     """
     if config.getoption("lanes_allow_patches") or config.getini("lanes_allow_patches") \
             or (config.getoption("lanes") or 0) <= 1:
@@ -400,15 +428,16 @@ def guard_process_patches(config, is_exclusive):
 
     from unittest import mock
 
-    def check(what: str) -> None:
+    def check(what: str, frame) -> None:
         lane = LANE.get()
-        if lane is None:
+        if lane is None or _from_pytest(frame):
             return
         item = lane.current_item
         if item is None or is_exclusive(item) or item.get_closest_marker("lanes_allow_patches"):
             return
-        if lane.fixture_scopes and lane.fixture_scopes[-1] == "session":
-            return
+        scope = lane.fixture_scopes[-1] if lane.fixture_scopes else "function"
+        if scope in ("session", "package", "module", "class"):
+            pytest.fail(PATCH_GUARD_SESSION_MESSAGE.format(what=what, scope=scope), pytrace=False)
         pytest.fail(PATCH_GUARD_MESSAGE.format(what=what), pytrace=False)
 
     notset = object()
@@ -422,8 +451,9 @@ def guard_process_patches(config, is_exclusive):
     def mock_enter(original):
         def __enter__(self):
             target = self.getter()
-            if _shared(target):
-                check(f"mock.patch of {getattr(target, '__name__', '?')}.{self.attribute}")
+            if _patch_by_path(self) or _shared(target):
+                check(f"mock.patch of {getattr(target, '__name__', type(target).__name__)}"
+                      f".{self.attribute}", sys._getframe(1))
             return original(self)
         return __enter__
 
@@ -432,7 +462,7 @@ def guard_process_patches(config, is_exclusive):
             if _shared_mapping(self.in_dict):
                 name = self.in_dict if isinstance(self.in_dict, str) else \
                     ("os.environ" if self.in_dict is os.environ else "sys.modules")
-                check(f"mock.patch.dict of {name}")
+                check(f"mock.patch.dict of {name}", sys._getframe(1))
             return original(self)
         return _patch_dict
 
@@ -440,9 +470,10 @@ def guard_process_patches(config, is_exclusive):
         def make(original):
             def method(self, target, name=notset, *args, **kwargs):
                 if isinstance(target, str):        # a dotted path: always a global
-                    check(f"monkeypatch.{verb}({target!r})")
+                    check(f"monkeypatch.{verb}({target!r})", sys._getframe(1))
                 elif _shared(target):
-                    check(f"monkeypatch.{verb} of {getattr(target, '__name__', '?')}.{name}")
+                    check(f"monkeypatch.{verb} of {getattr(target, '__name__', '?')}.{name}",
+                          sys._getframe(1))
                 return original(self, target, *((name,) if name is not notset else ()), *args, **kwargs)
             return method
         return make
@@ -451,7 +482,8 @@ def guard_process_patches(config, is_exclusive):
         def make(original):
             def method(self, dic, name, *args, **kwargs):
                 if dic is os.environ or dic is sys.modules:
-                    check(f"monkeypatch.{verb} of {'os.environ' if dic is os.environ else 'sys.modules'}")
+                    check(f"monkeypatch.{verb} of {'os.environ' if dic is os.environ else 'sys.modules'}",
+                          sys._getframe(1))
                 return original(self, dic, name, *args, **kwargs)
             return method
         return make
@@ -459,7 +491,7 @@ def guard_process_patches(config, is_exclusive):
     def mp_always(label):
         def make(original):
             def method(self, *args, **kwargs):
-                check(label)
+                check(label, sys._getframe(1))
                 return original(self, *args, **kwargs)
             return method
         return make
@@ -525,6 +557,7 @@ def isolate_lanes(config, session, is_exclusive):
         stack.enter_context(per_lane_worker_identity(config))            # P10
         stack.enter_context(guard_warnings_recorder(is_exclusive))       # P11
         stack.enter_context(guard_process_patches(config, is_exclusive))  # P14
+        stack.enter_context(fixture_follows_global_suspend(config))      # P15
         stack.enter_context(per_lane_basetemp(config))                   # P7
         setupstate_cls = stack.enter_context(per_lane_setupstate(session))  # P1
         log_templates = stack.enter_context(per_lane_logging(config))    # P3

@@ -111,9 +111,8 @@ def pytest_configure(config):
         pm.register(HybridWorkerSession(config), "lanes-session")
     elif getattr(config.option, "numprocesses", None) or getattr(config.option, "tx", None):
         # Hybrid, controller side: real xdist DSession and processes; lanes are virtual nodes.
-        controller = LanesController(config)     # passes interpreter flags on to the workers
         check_controller_touchpoints(config)
-        pm.register(controller, "lanes-controller")
+        pm.register(LanesController(config), "lanes-controller")   # passes -X flags to workers
     else:
         if getattr(config.option, "trace", False):
             raise pytest.UsageError("--lanes is incompatible with --trace: pdb would block a lane")

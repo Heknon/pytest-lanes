@@ -245,3 +245,39 @@ def test_capsys_and_no_capture_raise_no_stdio_alarm(pytester):
         r = run(pytester, "--lanes", "3", *extra, timeout=60)
         assert "integrity check failed" not in r.stdout.str() + r.stderr.str(), extra
         r.assert_outcomes(passed=5)
+
+
+
+def test_lanes_waiting_for_an_exclusive_test_are_not_running(pytester):
+    # A lane queued behind an exclusive test counted as running a test, so a lone test
+    # replacing sys.stdout failed the run although nothing ran beside it (round-5 review).
+    pytester.makepyfile(test_x="""
+        import io, sys, time, pytest
+        def test_a_swap():
+            real = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                time.sleep(0.5)
+            finally:
+                sys.stdout = real
+        @pytest.mark.lanes_exclusive
+        def test_b_excl():
+            pass
+    """)
+    r = run(pytester, "-n", "1", "--lanes", "2", timeout=60)
+    assert "integrity check failed" not in r.stdout.str() + r.stderr.str(), r.stdout.str()
+    r.assert_outcomes(passed=2)
+
+
+def test_stdio_message_is_accurate_with_no_capture(pytester):
+    # With -s, redirect_stdout is process-wide (lanes capture nothing to redirect per
+    # lane): the message said it was per lane.
+    pytester.makepyfile(test_x="""
+        import contextlib, io, time, pytest
+        @pytest.mark.parametrize("i", range(3))
+        def test_t(i):
+            with contextlib.redirect_stdout(io.StringIO()):
+                time.sleep(0.3)
+    """)
+    r = run(pytester, "--lanes", "3", "-s", timeout=60)
+    assert_integrity_failure(r, "sys.stdout was replaced", "with -s")

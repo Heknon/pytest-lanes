@@ -105,6 +105,12 @@ def _p13_redirect(config):
     return check_p13() if config.getoption("capture") != "no" else None
 
 
+def _p15_capture_suspend(config):
+    from .capture import check_p15
+
+    return check_p15(config)
+
+
 def _p14_patch_guard(config):
     from .isolation import check_p14
 
@@ -198,7 +204,7 @@ def _per_test_global_hooks(config):
 
 CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
           _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
-          _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect, _p14_patch_guard,
+          _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect, _p14_patch_guard, _p15_capture_suspend,
           _x1_xdist_scheduler_api,
           _c1_rerunfailures_client,
           _pytest_timeout, _faulthandler_timeout)
