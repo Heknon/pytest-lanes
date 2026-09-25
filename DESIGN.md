@@ -66,7 +66,7 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P10 | `config.__class__` (per-lane `workerinput`/`workeroutput`) | Each lane is its own xdist worker for `worker_id`, `testrun_uid` and `xdist.get_xdist_worker_id()` |
 | P11 | `WarningsRecorder.__enter__` | Before 3.14: `pytest.warns`/`deprecated_call`/`recwarn` in a non-exclusive test fail with instructions |
 | C1 | pytest-rerunfailures `ClientStatusDB` | Hybrid only; its one per-worker socket is serialized across lanes |
-| C2 | pytest-rerunfailures ≥ 16 `suspended_finalizers` | Per lane: a test about to be rerun parks its setup stack there, and another lane's teardown took it |
+| C2 | pytest-rerunfailures ≥ 15 `suspended_finalizers` | Per lane: a test about to be rerun parks its setup stack there, and another lane's teardown took it |
 | X1 | xdist scheduler protocol | Semi-public; checked on each scheduler instance, in both modes |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
@@ -103,7 +103,7 @@ Limits: a value set and restored inside one test body is not seen unless it goes
 ## Verification
 
 - **The contract suite (`tests/`, about 300 pytester subprocess tests):** scheduling, report parity against plain `-n` in every mode, isolation (output, logging, basetemp, worker identity and environment, warnings), robustness (failure paths, `-x`, Ctrl-C, crashes, options), the integrity check and canary suite, the patch guard, and the detector. Every fix started with a test that failed without it.
-- **The matrix (`scripts/matrix.sh`):** CPython 3.12, 3.13, 3.14 and free-threaded 3.14t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1 and 9.1.1 / 3.8.0.
+- **The matrix (`scripts/matrix.sh`):** CPython 3.12, 3.13, 3.14 and free-threaded 3.14t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1, 8.4.2 / 3.7.0 and 9.1.1 / 3.8.0.
 - **Stress:** the canary suite 20 times on 3.14t; a replica of a long-running environment suite (leased environments, session and module fixtures, subprocesses, child-thread logging, rerunfailures) at up to 64 environments under `--lanes 64` and `-n 4 --lanes 16`, with a crash, `-x` and Ctrl-C injected, identical to xdist; a 6,000-test soak on 200 lanes, whose memory grows exactly as plain pytest's (pytest keeps every report for the summary); 1,000 concurrent tests in one process.
 - **Plugins:** terminal, junitxml, report-log, pytest-html, pytest-metadata, pytest-cov, rerunfailures, pytest-mock, pytest-timeout (hybrid), and some 50 more scenarios (asyncio, repeat, order, dependency, randomly, subtests, unittest, fork and spawn, stdin, `sys.exit`, cache, stepwise, live logging).
 

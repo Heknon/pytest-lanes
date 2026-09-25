@@ -35,7 +35,7 @@ Required flags, which the plugin checks and refuses to run without:
 | Python 3.14 or later | `-X context_aware_warnings=1` or `PYTHON_CONTEXT_AWARE_WARNINGS=1`. It is the default on free-threaded 3.14t |
 | pytest 8.3.5 or earlier | `-p no:threadexception -p no:unraisableexception`, because those versions swap global hooks around every test |
 
-Supported: Python 3.12 and later, pytest 8.x–9.x and pytest-xdist 3.6–3.x (`pyproject.toml`). Tested on CPython 3.12, 3.13, 3.14 and 3.14t, with pytest 8.0.2 / 8.3.5 / 9.1.1 and pytest-xdist 3.6.1 / 3.8.0; other versions in range are untested, and a changed internal makes the plugin refuse to start rather than run incorrectly.
+Supported: Python 3.12 and later, pytest 8.x–9.x and pytest-xdist 3.6–3.x (`pyproject.toml`). Tested on CPython 3.12, 3.13, 3.14 and 3.14t, with pytest 8.0.2 / 8.3.5 / 8.4.2 / 9.1.1 and pytest-xdist 3.6.1 / 3.7.0 / 3.8.0; other versions in range are untested, and a changed internal makes the plugin refuse to start rather than run incorrectly.
 
 ## Using it
 
@@ -217,7 +217,7 @@ demo/                    manual smoke run (see demo/README.md)
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
 .venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~300 tests, ~2 min
-scripts/matrix.sh                 # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
+scripts/matrix.sh                 # 3.12 3.13 3.14 3.14t x 4 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t   # repeat runs on one interpreter
 ```
 

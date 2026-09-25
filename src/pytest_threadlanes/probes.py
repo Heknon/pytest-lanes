@@ -86,9 +86,11 @@ def _c2_rerunfailures_suspended_finalizers(config):
     rf = rerunfailures_module()
     if rf is None or not hasattr(rf, "suspended_finalizers"):
         return None
-    restore = getattr(rf, "_restore_suspended_finalizers", None)
-    if not isinstance(rf.suspended_finalizers, dict) or restore is None \
-            or "suspended_finalizers" not in restore.__code__.co_names:
+    # Read by name as a module global: in _restore_suspended_finalizers (16) or in
+    # pytest_runtest_teardown (15), so replacing the module attribute takes effect.
+    readers = [f for f in vars(rf).values() if callable(f) and hasattr(f, "__code__")
+               and "suspended_finalizers" in f.__code__.co_names]
+    if not isinstance(rf.suspended_finalizers, dict) or not readers:
         return "C2 pytest-rerunfailures suspended_finalizers (module-level dict read by name)"
     return None
 

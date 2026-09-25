@@ -3,15 +3,17 @@
 # Usage: scripts/matrix.sh [python ...]      default: 3.12 3.13 3.14 3.14t
 # Needs uv and network access to PyPI (or a mirror: set UV_INDEX_URL). Missing interpreters
 # are fetched with `uv python install`; use a uv recent enough to know 3.14 final, not an rc.
-# RUNS=N repeats the suite N times per combo (flakiness check).
+# RUNS=N repeats the suite N times per combo (flakiness check); WORKERS=N sets -n (default 4).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PYTHONS=("$@")
 [ ${#PYTHONS[@]} -gt 0 ] || PYTHONS=(3.12 3.13 3.14 3.14t)
 RUNS=${RUNS:-1}
+WORKERS=${WORKERS:-4}      # xdist workers for the suite itself (the tests are subprocesses)
 COMBOS=(
   "pytest==8.0.2 pytest-xdist==3.6.1 pytest-rerunfailures==14.0"
   "pytest==8.3.5 pytest-xdist==3.6.1 pytest-rerunfailures==14.0"
+  "pytest==8.4.2 pytest-xdist==3.7.0 pytest-rerunfailures==15.1"
   "pytest==9.1.1 pytest-xdist==3.8.0 pytest-rerunfailures"
 )
 rc=0
@@ -23,7 +25,7 @@ for py in "${PYTHONS[@]}"; do
     uv pip install -q -p "$venv/bin/python" $combo -e "$ROOT[test]"
     for run in $(seq "$RUNS"); do
       echo "=== $("$venv/bin/python" -VV | head -1) | $combo | run $run/$RUNS"
-      (cd "$ROOT" && "$venv/bin/python" -m pytest tests -q -p no:cacheprovider -p no:warnings) || rc=1
+      (cd "$ROOT" && "$venv/bin/python" -m pytest tests -q -p no:cacheprovider -p no:warnings -n "$WORKERS") || rc=1
     done
   done
 done

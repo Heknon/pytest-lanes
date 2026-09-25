@@ -93,7 +93,7 @@ All are probed at startup (`probes.py`) except P1 (`session._setupstate`), which
 | P14 | stdlib `unittest.mock._patch.__enter__` (`.getter`: a `partial(pkgutil.resolve_name, path)` for dotted paths, `.attribute`), `_patch_dict._patch_dict` (`.in_dict`); public `pytest.MonkeyPatch` methods | The patch guard: in a test that is not exclusive, a patch of a module or class attribute, anything by dotted path, `os.environ`/`sys.modules`, `setenv`/`delenv`, `chdir` or `syspath_prepend` fails the test with instructions. Session-scoped fixtures are guarded too (each lane tears its own down when it finishes, undoing the patch for lanes still running: seen as a KeyError); the message says to set such values in `pytest_configure`. Exempt: instances and classes defined in a function, pytest's own patches (its twisted support), `lanes_exclusive` and `lanes_allow_patches` tests, processes with one lane; `--lanes-allow-patches` / ini `lanes_allow_patches` turn it off. Direct writes (`os.environ[k] = v`, `del`, `os.putenv`, `os.chdir`) are guarded too, through the public audit events `os.putenv`/`os.unsetenv`/`os.chdir` (no internal): an environment write while another lane spawns a subprocess breaks that spawn. Not guarded: objects no module holds (an `lru_cache`/`get_settings()` singleton, an entry reached only through another object: presumed the test's own; `--lanes-detect` reports them), forked children (their state is their own), a `chdir` to the current directory, writes while a module is being imported (once per process), and pytest-cov/coverage (invariant 4) |
 | P15 | `CaptureManager.suspend_global_capture` / `resume_global_capture` (`_capture_fixture`, `suspend_fixture`, `resume_fixture`) | On a lane, they also suspend/resume the test's capture fixture. Plugins write to the terminal between the two (`--setup-show`); in plain pytest that bypasses capfd as a side effect of suspending global capture, which lanes turn off, so the line went into the test's capfd. Probed, with `CaptureFixture._is_started` |
 | C1 | pytest-rerunfailures ≥ 15: `config.failures_db` (`ClientStatusDB`) | A hybrid worker's lanes shared its one socket to the controller; interleaved request/response pairs killed a lane with `ValueError`. Every method of the client is serialized (16.7 added socket methods a fixed list missed) |
-| C2 | pytest-rerunfailures ≥ 16: module-level `suspended_finalizers` | Parks the setup stack of a test about to be rerun; every test's teardown restores it into its own SetupState. Shared, another lane took it (fixtures torn down mid-module, or never). Replaced by a per-lane dict for the session; probed (a dict read by name in `_restore_suspended_finalizers`) |
+| C2 | pytest-rerunfailures ≥ 15: module-level `suspended_finalizers` | Parks the setup stack of a test about to be rerun; every test's teardown restores it into its own SetupState. Shared, another lane took it (fixtures torn down mid-module, or never). Replaced by a per-lane dict for the session; probed (a dict read by name as a module global: in `_restore_suspended_finalizers` in 16, in `pytest_runtest_teardown` in 15) |
 | X1 | xdist scheduler protocol | Uses `add_node`, `add_node_collection`, `schedule`, `mark_test_complete`, `remove_node`, `tests_finished`, `collection_is_completed`, `has_pending`, `nodes`, `numnodes`. Checked on each scheduler instance, in single-process and hybrid mode, never by import name: xdist 3.6.1 lacks `parse_tx_spec_config` |
 | X2 | hybrid worker: `WorkerInteractor.channel`, `.sendevent`, `.item_index` | Located by class name, because xdist executes `remote.py` via execnet and `isinstance` fails. Probed in the worker (its report forwarder must still read `item_index`) |
 | X3 | hybrid controller: `DSession.handle_crashitem` | Used for the 2nd and later crashed lanes of one worker |
@@ -105,7 +105,7 @@ All are probed at startup (`probes.py`) except P1 (`session._setupstate`), which
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
 .venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~300 tests, ~2 min
-scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
+scripts/matrix.sh                        # 3.12 3.13 3.14 3.14t x 4 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t          # repeat runs, one interpreter
 ```
 
@@ -119,7 +119,7 @@ Required flags and environment:
 
 ## Status
 
-- The suite (`tests/`, about 300 tests) passes on the full matrix: CPython 3.12, 3.13, 3.14 and 3.14t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1 and 9.1.1 / 3.8.0.
+- The suite (`tests/`, about 300 tests) passes on the full matrix: CPython 3.12, 3.13, 3.14 and 3.14t, each with pytest 8.0.2 / xdist 3.6.1, 8.3.5 / 3.6.1, 8.4.2 / 3.7.0 and 9.1.1 / 3.8.0.
 - Stress runs are described in DESIGN.md → Verification. Report-log output is identical to plain xdist in all modes; a crash in hybrid mode is recovered by xdist.
 - Scale (1-core sandbox): 1,000 concurrent 3-second tests took 4.4s and 93 MB as 1 × 1000; 7.4s and 244 MB as 4 × 250; 14.5s and 848 MB as 20 × 50.
 - Released through `.github/workflows/release.yml` (README → Releasing); changes go in `CHANGELOG.md`.

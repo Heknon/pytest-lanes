@@ -23,5 +23,6 @@ First release.
 - `--lanes-detect`: a sequential run that reports which tests and fixtures change
   process-wide state.
 - Requires Python 3.12 or later. Compatible with pytest 8.0–9.x and pytest-xdist 3.6–3.x;
-  tested on CPython 3.12, 3.13, 3.14 and 3.14t.
+  tested on CPython 3.12, 3.13, 3.14 and 3.14t with pytest 8.0.2, 8.3.5, 8.4.2 and 9.1.1 and
+  pytest-xdist 3.6.1, 3.7.0 and 3.8.0.
 - MIT licence.

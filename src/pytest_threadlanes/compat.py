@@ -1,6 +1,6 @@
 """Compatibility with third-party plugins that assume one test at a time per process.
 
-C2 pytest-rerunfailures >= 16: its module-level ``suspended_finalizers`` is made per
+C2 pytest-rerunfailures >= 15: its module-level ``suspended_finalizers`` is made per
 lane (``per_lane_rerun_suspended_finalizers``).
 
 C1 pytest-rerunfailures >= 15: under xdist each worker process gets one socket to
@@ -111,7 +111,7 @@ def rerunfailures_module():
 
 @contextlib.contextmanager
 def per_lane_rerun_suspended_finalizers():
-    """C2 pytest-rerunfailures >= 16: ``suspended_finalizers``, a module-level dict.
+    """C2 pytest-rerunfailures >= 15: ``suspended_finalizers``, a module-level dict.
 
     Before rerunning a test it moves the setup stack above the test into this dict, and
     every test's teardown moves the dict back into its own SetupState. Shared by lanes,
