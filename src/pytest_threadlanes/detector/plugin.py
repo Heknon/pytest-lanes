@@ -25,7 +25,7 @@ def refuse_concurrent(config) -> None:
         raise pytest.UsageError(CONCURRENT)
     problem = check_d1()
     if problem:
-        raise pytest.UsageError(f"pytest-lanes: --lanes-detect cannot record patches on this "
+        raise pytest.UsageError(f"pytest-threadlanes: --lanes-detect cannot record patches on this "
                                 f"Python: an internal changed:\n  {problem}")
 
 

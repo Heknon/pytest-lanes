@@ -1,5 +1,5 @@
 [project]
-name = "pytest-lanes"
+name = "pytest-threadlanes"
 version = "0.0.1"
 description = "Run pytest-xdist schedulers on thread lanes: in one process, or many processes x many lanes"
 requires-python = ">=3.9"   # tested: 3.12, 3.13, 3.14, 3.14t
@@ -12,7 +12,7 @@ dependencies = [
 test = ["pytest-reportlog", "pytest-rerunfailures", "pytest-html", "pytest-timeout", "pytest-mock", "pytest-cov"]
 
 [project.entry-points.pytest11]
-lanes = "pytest_lanes.plugin"
+threadlanes = "pytest_threadlanes.plugin"
 
 [build-system]
 requires = ["setuptools>=64"]

@@ -45,7 +45,7 @@ def pytest_runtest_protocol(item, nextitem):
 def assert_integrity_failure(result, *fragments):
     out = result.stdout.str() + result.stderr.str()
     assert result.ret != 0, out
-    assert "pytest-lanes integrity check failed" in out, out
+    assert "pytest-threadlanes integrity check failed" in out, out
     for fragment in fragments:
         assert fragment in out, out
 

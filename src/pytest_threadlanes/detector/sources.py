@@ -6,7 +6,7 @@
   any site-packages), plus the packages named in the ``lanes_detect_modules`` ini.
   The walk covers their globals and the class attributes of the classes they define.
 * **Plugin objects:** every object registered with pytest's plugin manager, except
-  pytest's, pluggy's, xdist's and pytest-lanes' own, whose per-test state lanes
+  pytest's, pluggy's, xdist's and pytest-threadlanes' own, whose per-test state lanes
   already keep per lane. A plugin instance created in ``pytest_configure`` is found
   here even if no module global refers to it.
 
@@ -24,10 +24,10 @@ from pathlib import Path
 
 from .walk import Walker
 
-#: Owned by pytest and pytest-lanes, and kept per lane already (touchpoint P6).
+#: Owned by pytest and pytest-threadlanes, and kept per lane already (touchpoint P6).
 IGNORED_ENV = frozenset({"PYTEST_CURRENT_TEST"})
 #: Plugin packages whose state lanes already isolate or that are process machinery.
-_CORE = ("_pytest", "pytest", "pluggy", "xdist", "pytest_lanes", "py", "execnet")
+_CORE = ("_pytest", "pytest", "pluggy", "xdist", "pytest_threadlanes", "py", "execnet")
 
 
 def _top(name: str) -> str:

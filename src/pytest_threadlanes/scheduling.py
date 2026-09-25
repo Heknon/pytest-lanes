@@ -65,7 +65,7 @@ def make_scheduler(config, numnodes: int):
 
     missing = [m for m in SCHEDULER_PROTOCOL if not hasattr(sched, m)]
     if missing:
-        raise pytest.UsageError(f"pytest-lanes: scheduler {type(sched).__name__} lacks {missing}")
+        raise pytest.UsageError(f"pytest-threadlanes: scheduler {type(sched).__name__} lacks {missing}")
     sched.numnodes = numnodes
     reject_unsupported(sched)
     return sched

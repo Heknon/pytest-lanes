@@ -47,7 +47,7 @@ SETTERS = (("random", "seed"), ("random", "setstate"), ("socket", "setdefaulttim
            ("sys", "setrecursionlimit"), ("sys", "setswitchinterval"), ("logging", "disable"),
            ("gc", "disable"), ("gc", "set_threshold"), ("gc", "freeze"), ("signal", "signal"))
 #: Callers whose setter calls are pytest's own business, not the test's.
-MACHINERY = ("_pytest", "pytest", "pluggy", "xdist", "pytest_lanes", "pytest_timeout",
+MACHINERY = ("_pytest", "pytest", "pluggy", "xdist", "pytest_threadlanes", "pytest_timeout",
              "coverage", "pytest_cov", "execnet")
 STDIO = ("stdout", "stderr", "stdin")
 STDIO_INTERVAL = 0.001

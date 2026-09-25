@@ -7,7 +7,7 @@ _LABEL = {"unsafe": "UNSAFE", "check": "CHECK", "ok": "OK"}
 
 
 def write_terminal(tr, report: dict, json_path=None) -> None:
-    tr.write_sep("=", "pytest-lanes shared-state report")
+    tr.write_sep("=", "pytest-threadlanes shared-state report")
     findings = report["findings"]
     unsafe = [f for f in findings if f["severity"] == "unsafe"]
     if not unsafe:

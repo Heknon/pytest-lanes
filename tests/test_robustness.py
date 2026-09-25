@@ -299,7 +299,7 @@ def test_hybrid_refuses_up_front_when_its_workers_would(pytester, monkeypatch):
     pytester.makepyfile("def test_t(): pass\n")
     r = pytester.runpytest_subprocess(*WARNINGS_ON, "-n", "2", "--lanes", "2", timeout=60)
     assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str() + r.stderr.str()
-    r.stderr.fnmatch_lines(["*pytest-lanes refuses to run*", "*warnings plugin active*"])
+    r.stderr.fnmatch_lines(["*pytest-threadlanes refuses to run*", "*warnings plugin active*"])
     assert "Traceback" not in r.stdout.str() + r.stderr.str()
 
 

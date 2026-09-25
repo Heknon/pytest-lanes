@@ -1,5 +1,5 @@
-# Manual only: GitHub runners are paid. Run the contract suite locally with
-# scripts/matrix.sh; dispatch this workflow deliberately (backlog item 9).
+# Manual only: GitHub runners are paid. The local gate is scripts/matrix.sh, which this
+# mirrors; dispatch this workflow deliberately (backlog item 9 covers adding triggers).
 name: contract
 on:
   workflow_dispatch:
@@ -9,23 +9,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13", "3.14"]
+        python: ["3.12", "3.13", "3.14", "3.14t"]
         deps:
+          - "pytest==8.0.2 pytest-xdist==3.6.1 pytest-rerunfailures==14.0"
           - "pytest==8.3.5 pytest-xdist==3.6.1 pytest-rerunfailures==14.0"
           - "pytest==9.1.1 pytest-xdist==3.8.0 pytest-rerunfailures"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "${{ matrix.python }}"}
-      - run: pip install ${{ matrix.deps }} pytest-reportlog pytest-html -e .
-      - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings
+      - run: pip install ${{ matrix.deps }} -e ".[test]"
+      - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4
   nightly-upstream:
-    # Early warning when pytest/xdist main break a private touchpoint (P1-P6, X1-X3).
+    # Early warning when pytest/xdist main change a private touchpoint (P1-P15, X1-X4):
+    # the startup probes then refuse to run and name it.
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}
-      - run: pip install git+https://github.com/pytest-dev/pytest git+https://github.com/pytest-dev/pytest-xdist pytest-reportlog pytest-rerunfailures pytest-html -e .
-      - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings
+      - run: pip install git+https://github.com/pytest-dev/pytest git+https://github.com/pytest-dev/pytest-xdist -e ".[test]"
+      - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4

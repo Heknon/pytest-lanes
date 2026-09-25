@@ -437,7 +437,7 @@ def guard_warnings_recorder(is_exclusive):
     def __enter__(self):
         lane = LANE.get()
         if lane is not None and lane.current_item is not None and not is_exclusive(lane.current_item):
-            pytest.fail("pytest-lanes: pytest.warns/deprecated_call/recwarn change process-wide "
+            pytest.fail("pytest-threadlanes: pytest.warns/deprecated_call/recwarn change process-wide "
                         "warning state before Python 3.14, so this test must run alone: mark it "
                         "@pytest.mark.lanes_exclusive (or run on Python 3.14+ with "
                         "-X context_aware_warnings=1).", pytrace=False)
@@ -487,7 +487,7 @@ def show_unmatched_warnings_always() -> None:
 
 # ------------------------------------------------------------------ P14: process-wide patches
 PATCH_GUARD_MESSAGE = (
-    "pytest-lanes: {what} patches process-wide state: every test running on another lane "
+    "pytest-threadlanes: {what} patches process-wide state: every test running on another lane "
     "sees it until it is undone. Mark this test @pytest.mark.lanes_exclusive (it then runs "
     "alone), or, if nothing another test runs uses what it patches, "
     "@pytest.mark.lanes_allow_patches. --lanes-allow-patches turns this check off.")
@@ -496,7 +496,7 @@ ENVIRON_NOTE = (
     "child reads the environment while it changes ('OSError: [Errno 14] Bad address', or a "
     "torn environment).")
 PATCH_GUARD_SESSION_MESSAGE = (
-    "pytest-lanes: {what} in a {scope}-scoped fixture patches process-wide state, and each "
+    "pytest-threadlanes: {what} in a {scope}-scoped fixture patches process-wide state, and each "
     "lane has its own copy of that fixture: the first lane to finish tears it down and "
     "undoes the patch while other lanes still run. For a value the whole run needs, set it "
     "once in pytest_configure or pytest_sessionstart (conftest.py). --lanes-allow-patches "

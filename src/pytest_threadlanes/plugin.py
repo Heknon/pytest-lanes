@@ -1,6 +1,6 @@
-"""pytest-lanes entry point: options, and choosing a mode.
+"""pytest-threadlanes entry point: options, and choosing a mode.
 
-pytest-lanes runs pytest-xdist's own schedulers on thread "lanes":
+pytest-threadlanes runs pytest-xdist's own schedulers on thread "lanes":
 
     pytest -n 8               plain xdist (untouched)
     pytest --lanes 200        1 process x 200 lanes       -> single.SingleProcessSession

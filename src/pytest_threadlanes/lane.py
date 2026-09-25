@@ -23,7 +23,7 @@ import sys
 import weakref
 from types import SimpleNamespace
 
-LANE: contextvars.ContextVar = contextvars.ContextVar("pytest_lanes.lane", default=None)
+LANE: contextvars.ContextVar = contextvars.ContextVar("pytest_threadlanes.lane", default=None)
 
 #: Queue marker that ends a lane's loop, like xdist's "shutdown" command.
 SHUTDOWN = object()

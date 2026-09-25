@@ -170,6 +170,6 @@ class Ledger:
         more = len(self.violations) - len(shown)
         lines = "\n".join(f"  - {v}" for v in shown) + (f"\n  ... and {more} more" if more else "")
         raise IntegrityError(
-            "pytest-lanes integrity check failed: the reports of this run do not match what "
+            "pytest-threadlanes integrity check failed: the reports of this run do not match what "
             "its lanes ran, so its outcomes cannot be trusted. Please report this with the "
             f"lines below.\n{lines}")

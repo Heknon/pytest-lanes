@@ -1,12 +1,12 @@
-# Design: pytest-lanes support in pytest-failure-instrumentation, the Sahara API and the Sahara UI
+# Design: pytest-threadlanes support in pytest-failure-instrumentation, the Sahara API and the Sahara UI
 
 **Status:** ready to implement. Nothing described here has been built yet.
-**Written:** 2026-09-24, from a working session on the `pytest-lanes` branch `claude/pytest-contract-backlog-722ycm`.
+**Written:** 2026-09-24, from a working session on the `pytest-threadlanes` branch `claude/pytest-contract-backlog-722ycm`.
 **For:** the agent that implements it. Every file and function named below was read while writing this doc. Line numbers are from the commits listed under "Repositories", and may drift.
 
 ## 1. Context
 
-`pytest-lanes` runs many tests at once as threads ("lanes") inside one process. It has three modes:
+`pytest-threadlanes` runs many tests at once as threads ("lanes") inside one process. It has three modes:
 
 - `pytest --lanes 3`: one process with 3 lanes, named `ln0`, `ln1`, `ln2`.
 - `pytest -n 2 --lanes 3`: 2 xdist processes, `gw0` and `gw1`, each with 3 lanes named `gw0.ln0` … `gw1.ln2`.
@@ -23,10 +23,10 @@ Measured end to end with the plugin at `9ecffa5`, a live server (`--callstack-po
 | `/workers` rows | one per worker, each with its test | **one row per process**: `main` (single process) or `gw0`/`gw1` (hybrid). Each names only **one** of its N running tests, whichever lane wrote last. The counters sum all lanes |
 | `/stack?pid=` and `?worker=gw0` | the test's thread | ✅ every lane is its own thread, `lane-ln0` or `lane-gw0.ln0`, with correct frames |
 | `/stack?worker=ln0` and `?worker=gw0.ln0` | — | 404 |
-| Stall incident: one test hangs 12s, siblings keep running, `failure_stall_seconds=3` | ✅ right test, right line | ❌ `--lanes`: blames the **wrong test**, and also raises a false `STALLED_SILENT` for "worker `ln0`". ❌ Hybrid: "no test running", with the stack in pytest-lanes' `_pump` |
+| Stall incident: one test hangs 12s, siblings keep running, `failure_stall_seconds=3` | ✅ right test, right line | ❌ `--lanes`: blames the **wrong test**, and also raises a false `STALLED_SILENT` for "worker `ln0`". ❌ Hybrid: "no test running", with the stack in pytest-threadlanes' `_pump` |
 | Worker death, hybrid | names the test | names one test, and only by luck of write order. Sibling lanes are not mentioned |
 | UI: a running test's Worker tab | ✅ | ❌ tests on N−1 of N lanes show "No worker in this run is on …", with no stack |
-| UI: stack view | opens `MainThread`, which is the test | opens `MainThread`, which is **pytest-lanes' scheduler**; the test's `lane-*` thread is collapsed further down |
+| UI: stack view | opens `MainThread`, which is the test | opens `MainThread`, which is **pytest-threadlanes' scheduler**; the test's `lane-*` thread is collapsed further down |
 
 ## 3. Goals and non-goals
 
@@ -36,11 +36,11 @@ Measured end to end with the plugin at `9ecffa5`, a live server (`--callstack-po
 3. Without lanes, the plugin's files and HTTP payloads are **identical** to today's, and its existing test suite passes unchanged.
 4. Only small, additive changes in the API and UI. All new wire fields are optional.
 
-**Non-goals, for later:** grouping lanes under their process in the UI, per-lane profiling, per-lane memory figures (not measurable within one process), and crash-collateral annotation (pytest-lanes backlog item 6, which this makes easy afterwards).
+**Non-goals, for later:** grouping lanes under their process in the UI, per-lane profiling, per-lane memory figures (not measurable within one process), and crash-collateral annotation (pytest-threadlanes backlog item 6, which this makes easy afterwards).
 
-## 4. Facts about pytest-lanes the implementation relies on
+## 4. Facts about pytest-threadlanes the implementation relies on
 
-The code is in `Heknon/pytest-lanes` under `src/pytest_lanes/`.
+The code is in `Heknon/pytest-lanes` under `src/pytest_threadlanes/`.
 
 - **Lane identity comes through xdist's own API.** On a lane thread, `config.workerinput["workerid"]` is the lane (`ln3` or `gw0.ln3`), as are `worker_id` and `xdist.get_xdist_worker_id()`. That's touchpoint P10 in `isolation.py`, installed at `pytest_sessionstart`.
   - Elsewhere, `workerinput` is what it was: **absent** on the single-process main thread, and the **process's own** (`gw0`) on a hybrid worker's main thread.
@@ -49,8 +49,8 @@ The code is in `Heknon/pytest-lanes` under `src/pytest_lanes/`.
   - In single-process mode, `report.node` is also set to the lane (`ThreadNode`, with `.gateway.id == "ln3"`), as xdist sets it to the worker. This is why the plugin's engine currently thinks `ln3` is an xdist worker (§2).
 - **Lane threads are named `lane-<lane id>`,** for example `lane-gw0.ln3`, and run the whole of each test: setup, call and teardown hooks.
 - Exclusive tests (`capsys` and the like) run on an extra lane, `ln-serial`, in single-process mode.
-- pytest-lanes forces `--capture=no`, then captures stdout/stderr per lane itself. So **pytest does not touch fd 2 per test** under lanes.
-- A process can be told it is running lanes with `config.getoption("lanes", None)` (int or None). `config.pluginmanager.hasplugin("pytest_lanes.plugin")` also works.
+- pytest-threadlanes forces `--capture=no`, then captures stdout/stderr per lane itself. So **pytest does not touch fd 2 per test** under lanes.
+- A process can be told it is running lanes with `config.getoption("lanes", None)` (int or None). `config.pluginmanager.hasplugin("pytest_threadlanes.plugin")` also works.
 
 ## 5. How the plugin works today (the parts this touches)
 
@@ -122,7 +122,7 @@ Every change is conditional on "this hook is running on a lane". So a run withou
   - read the in-flight nodeid from the lane's state;
   - take the stack from the process, and name the lane's `thread_name` in the incident so the reader knows which thread to look at. Put the lane's thread first, or only the lane's thread, in `raw_stack` if that's simple.
 - `_live_pid(worker)`: for `gw0.ln3`, ask for `gw0` (the part before the first `.`). In a single-process run it is this process's pid.
-- The pytest-lanes thread name and lane id can also be recovered from the report (`report.lane_id`), so nothing else is needed from pytest-lanes.
+- The pytest-threadlanes thread name and lane id can also be recovered from the report (`report.lane_id`), so nothing else is needed from pytest-threadlanes.
 
 **C5 · Worker death names each lane's test** (`incidents/death.py`)
 
@@ -141,7 +141,7 @@ These all assume one test at a time per process. Under lanes they'd interfere wi
 - **Profiler:** it attributes samples to one current test. **Disable it under lanes** (non-goal), with an event.
 - **`heartbeat.nodeid`/`.phase`:** leave the process's beat without a nodeid under lanes. Per-lane figures are C3's `threads` map.
 
-**C7 · Version:** bump `pyproject.toml` `version` **and** `src/pytest_failure_instrumentation/__init__.py` `__version__` from `0.13.1` to **`0.14.0`**. This is a minor bump: new optional fields and behaviour, no breaking change. Add a README section, "Running under pytest-lanes", covering the per-lane rows, the new fields, per-lane stalls, and what C6 turns off.
+**C7 · Version:** bump `pyproject.toml` `version` **and** `src/pytest_failure_instrumentation/__init__.py` `__version__` from `0.13.1` to **`0.14.0`**. This is a minor bump: new optional fields and behaviour, no breaking change. Add a README section, "Running under pytest-threadlanes", covering the per-lane rows, the new fields, per-lane stalls, and what C6 turns off.
 
 ### 6.2 Sahara API
 
@@ -174,7 +174,7 @@ Add **one lanes-shaped run** so the UI can be developed and screenshotted withou
 
 Keep all existing data unchanged, since runs without lanes remain the default.
 
-### 6.5 pytest-lanes
+### 6.5 pytest-threadlanes
 
 No change is required. Add the end-to-end check in Appendix B to its contract tests, as a test that runs only when pytest-failure-instrumentation is installed. That turns lanes plus instrumentation into a regression test in all three modes.
 
@@ -192,7 +192,7 @@ No change is required. Add the end-to-end check in Appendix B to its contract te
 
 Write the failing test first each time. **Run tests locally: GitHub runners are paid.** The plugin repo's `AGENTS.md` explains its CI policy; macOS runners in particular are expensive. Use `pytest -n 4` locally.
 
-1. **Plugin, C1 + C2.** Tests (pytester, subprocess, needing `pytest-lanes` installed; skip if it isn't):
+1. **Plugin, C1 + C2.** Tests (pytester, subprocess, needing `pytest-threadlanes` installed; skip if it isn't):
    - under `--lanes 3` and `-n 2 --lanes 3`, `/workers` (or `topology.snapshot()` directly) lists one row per lane, each with its own `nodeid`, and no process row;
    - `/stack?worker=gw0.ln1` resolves;
    - **without lanes, the state files and `/workers` JSON are byte-identical to a baseline captured from 0.13.1.**
@@ -202,7 +202,7 @@ Write the failing test first each time. **Run tests locally: GitHub runners are 
 5. **Plugin, C7:** version 0.14.0 in both places, and the README section. Run the full plugin suite locally without lanes; it must be green and unchanged.
 6. **Mock API (§6.4),** then **UI (§6.3)**, with unit tests. Check in the browser against the mock's lanes run.
 7. **API (§6.2):** bump the pin and run `verify_live_view.py`.
-8. **pytest-lanes (§6.5):** the end-to-end contract test.
+8. **pytest-threadlanes (§6.5):** the end-to-end contract test.
 
 ## 9. Open questions for the implementer to confirm, not decide alone
 
@@ -264,7 +264,7 @@ def test_s(env, step):
 
 ## Appendix C: cross-check with `--lanes-detect`
 
-pytest-lanes' shared-state detector (`pytest --lanes-detect`, added after this doc was first written) was run on a small suite with `--failure-instrumentation` active. With no hints, it reported this per-test state in the plugin's objects. Every item is already covered by §6.1:
+pytest-threadlanes' shared-state detector (`pytest --lanes-detect`, added after this doc was first written) was run on a small suite with `--failure-instrumentation` active. With no hints, it reported this per-test state in the plugin's objects. Every item is already covered by §6.1:
 
 | Reported path | What it is | Covered by |
 |---|---|---|

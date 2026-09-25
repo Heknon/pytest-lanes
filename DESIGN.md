@@ -1,4 +1,4 @@
-# pytest-lanes: xdist schedulers on thread lanes, in one process or many
+# pytest-threadlanes: xdist schedulers on thread lanes, in one process or many
 
 ## Three modes, one scheduler
 

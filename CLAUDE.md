@@ -1,12 +1,14 @@
-# CLAUDE.md: pytest-lanes
+# CLAUDE.md: pytest-threadlanes
 
 Read this file first. Read DESIGN.md next for the full rationale, the evidence behind it, and the flags.
 
 ## What this is and why
 
+*Name:* distribution `pytest-threadlanes`, package `src/pytest_threadlanes/`, plugin entry `threadlanes`. Renamed from `pytest-lanes` (round 7): an unrelated PyPI project owns that name, its import package and its plugin entry. Options, markers and ini settings keep the `lanes` names; the repository is still `Heknon/pytest-lanes`.
+
 We have a pytest suite of long, I/O-bound tests. Each test takes 1–2 hours, and we need to run thousands of them concurrently. pytest-xdist gives one process per concurrent test, at 150–500 MB each, so memory caps our concurrency. The suite's infrastructure is hundreds of thousands of lines of synchronous code, so converting it to async is not an option.
 
-pytest-lanes runs pytest-xdist's own scheduler objects on thread "lanes":
+pytest-threadlanes runs pytest-xdist's own scheduler objects on thread "lanes":
 
 - `pytest -n 8`: plain xdist, which is the baseline and is unchanged.
 - `pytest --lanes 200`: one process with 200 thread lanes.
@@ -66,7 +68,7 @@ Other files:
 - `tests/` is the spec: pytester subprocess tests (about 300) in `test_contract.py` (the original contract), `test_parity.py` (report parity in all modes), `test_robustness.py` (failure paths, options, run shapes), `test_isolation.py` (output, logging, basetemp, worker identity and environment, warnings), `test_integrity.py` (the integrity check, and a canary suite under maximum thread-switching pressure), `test_patch_guard.py` (P14) and `test_detector.py` (`--lanes-detect`). Shared helpers live in `tests/lanes_testing.py`.
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
-- `.github/workflows/ci.yml` is a draft CI workflow, manual-only (`workflow_dispatch`): GitHub runners are paid.
+- `.github/workflows/ci.yml` is the CI workflow, run by hand only (`workflow_dispatch`): GitHub runners are paid.
 
 ## Internal touchpoints
 
@@ -175,7 +177,7 @@ These are not bugs to "fix" by weakening the invariants.
    - Run it on the user's repo and hand over the report. Do not auto-edit the user's tests.
 6. **Crash collateral (F5).** *Closed in round 7 by the user's decision: no annotation. Crash reports stay exactly as xdist makes them (lanes must not be intrusive); under a loadscope-based scheduler collateral tests are rerun like xdist's crashed test.*
 7. **worksteal support.** Implement `send_steal` and the unscheduled round trip for `ThreadNode`, and for `LaneProxy` via a new `lanes_steal` command. Add a contract test with a worksteal parity check. Note: xdist's `worksteal` steals single tests, which would split an environment; for the user's suite the useful form steals whole, not-yet-started scopes, and only after the recommended `_reschedule` (README) proves insufficient.
-8. **User's failure-instrumentation plugin.** *Located (pytest-failure-instrumentation; design for lanes support on its `feature/lanes` branch, `docs/pytest-lanes-support.md`); smoke-tested in all three modes (rounds 3 and 6). Implementing that design is open.*
+8. **User's failure-instrumentation plugin.** *Located (pytest-failure-instrumentation; design for lanes support on its `feature/lanes` branch, `docs/pytest-threadlanes-support.md`); smoke-tested in all three modes (rounds 3 and 6). Implementing that design is open.*
    - Classify each of its hookimpls: A (report consumer), B (xdist observer), C (process protocol), or D (execution-side).
    - Add a contract test that loads it under all three modes and diffs its output against plain `-n`.
    - For class D, fix it by moving any "current test" global to `item.stash` or a contextvar.

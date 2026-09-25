@@ -309,4 +309,4 @@ def check_controller_touchpoints(config) -> None:
 def _raise_if(problems) -> None:
     problems = [p for p in problems if p]
     if problems:
-        raise pytest.UsageError("pytest-lanes refuses to run (fail-closed):\n  " + "\n  ".join(problems))
+        raise pytest.UsageError("pytest-threadlanes refuses to run (fail-closed):\n  " + "\n  ".join(problems))

@@ -62,7 +62,7 @@ class HybridWorkerSession(LaneRunner):
                 for n in nodes:
                     n.shutdown()
             else:
-                self.errors.append(RuntimeError(f"pytest-lanes: unsupported xdist command {name!r}"))
+                self.errors.append(RuntimeError(f"pytest-threadlanes: unsupported xdist command {name!r}"))
                 for n in nodes:
                     n.shutdown()
 

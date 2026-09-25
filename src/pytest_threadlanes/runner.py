@@ -139,7 +139,7 @@ class LaneRunner:
             return (yield)
         if fixturedef.argname in self.config.getini("lanes_exclusive_fixtures") \
                 and not self.is_exclusive(request.node):
-            pytest.fail(f"pytest-lanes: {fixturedef.argname!r} was requested at run time "
+            pytest.fail(f"pytest-threadlanes: {fixturedef.argname!r} was requested at run time "
                         f"(getfixturevalue), so this test was not scheduled to run alone and "
                         f"would capture other lanes' output. Add it to the test's arguments "
                         f"or mark the test @pytest.mark.lanes_exclusive.", pytrace=False)
