@@ -23,5 +23,6 @@ belongs to an unrelated project).
   `--lanes-allow-patches` opts out.
 - `--lanes-detect`: a sequential run that reports which tests and fixtures change
   process-wide state.
-- Compatible with pytest 8.0–9.x and pytest-xdist 3.6–3.x; tested on CPython 3.12, 3.13,
-  3.14 and 3.14t.
+- Requires Python 3.12 or later. Compatible with pytest 8.0–9.x and pytest-xdist 3.6–3.x;
+  tested on CPython 3.12, 3.13, 3.14 and 3.14t.
+- MIT licence.
