@@ -20,7 +20,7 @@ jobs:
         with: {python-version: "${{ matrix.python }}"}
       - run: pip install ${{ matrix.deps }} -e ".[test]"
       - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4
-  nightly-upstream:
+  upstream-main:
     # Early warning when pytest/xdist main change a private touchpoint (P1-P15, X1-X4):
     # the startup probes then refuse to run and name it.
     runs-on: ubuntu-latest

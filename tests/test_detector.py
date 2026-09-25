@@ -663,3 +663,40 @@ def test_patch_labels_are_the_walked_paths(pytester):
                        ("module:infra.User.table", "test_factory_class")]:
         assert path in patched and f"test_a.py::{test}" in patched[path]["nodeids"], (path, sorted(patched))
     assert "test_a.py::test_dotted_instance_attr" in patched["module:infra.HOLDER.client.timeout"]["nodeids"]
+
+
+def test_dict_keys_with_the_same_label_are_told_apart(pytester):
+    # Keys that are not plain values were all labelled "<type>", and long string keys were
+    # cut: two keys shared a path, and a change to one was lost.
+    long = "https://example.test/" + "x" * 80
+    pytester.makepyfile(infra=f"""
+        HANDLERS = {{int: None, str: None}}
+        ROUTES = {{{long + 'a'!r}: None, {long + 'b'!r}: None}}
+    """, test_a=f"""
+        import infra
+        def _t(n):
+            infra.HANDLERS[int] = n
+            infra.ROUTES[{long + 'a'!r}] = n
+        def test_1(): _t(1)
+        def test_2(): _t(2)
+    """)
+    _, report = detect(pytester)
+    paths = [f["path"] for f in report["findings"] if f["severity"] == "unsafe"]
+    assert any(p.startswith("module:infra.HANDLERS[") for p in paths), report["findings"]
+    assert any(p.startswith("module:infra.ROUTES[") for p in paths), report["findings"]
+
+
+def test_private_slots_are_walked(pytester):
+    pytester.makepyfile(infra="""
+        class Client:
+            __slots__ = ("__current", "public")
+            def set(self, v):
+                self.__current = v
+        CLIENT = Client()
+    """, test_a="""
+        import infra
+        def test_1(): infra.CLIENT.set(1)
+        def test_2(): infra.CLIENT.set(2)
+    """)
+    _, report = detect(pytester)
+    assert "module:infra.CLIENT._Client__current" in findings(report, "per-test"), report["findings"]

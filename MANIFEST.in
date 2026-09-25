@@ -1,0 +1,3 @@
+# The sdist carries the full suite (tests/ needs its helpers) and the documents.
+include CHANGELOG.md DESIGN.md
+recursive-include tests *.py

@@ -388,7 +388,8 @@ def test_ctrl_c_while_the_main_thread_handles_a_finished_test(pytester):
     import os
     import subprocess
     import time
-    pytester.makeini("[pytest]\nlanes_interrupt_grace = 4\n")
+    # A long grace, so waiting it out is unmistakable (and a loaded machine is not).
+    pytester.makeini("[pytest]\nlanes_interrupt_grace = 30\n")
     pytester.makeconftest("""
         import os, signal, threading, time, pytest
         def pytest_runtest_logreport(report):   # a slow reporter, on the main thread
@@ -420,7 +421,7 @@ def test_ctrl_c_while_the_main_thread_handles_a_finished_test(pytester):
                        env=env, capture_output=True, text=True, timeout=60)
     took = time.monotonic() - started
     assert p.returncode == pytest.ExitCode.INTERRUPTED, p.stdout
-    assert took < 3.5, (took, p.stdout)
+    assert took < 15 and "did not stop" not in p.stdout, (took, p.stdout)
     assert (pytester.path / "teardown.log").exists(), p.stdout
 
 
@@ -477,7 +478,7 @@ def test_keyboard_interrupt_with_a_slow_reporter(pytester, mode):
     # "item done" left its lane waiting (grace period, no teardown), and in hybrid mode a
     # test was reported both passed and crashed (round-5 cycle-2 review).
     import time
-    pytester.makeini("[pytest]\nlanes_interrupt_grace = 5\n")
+    pytester.makeini("[pytest]\nlanes_interrupt_grace = 30\n")   # waiting it out is unmistakable
     pytester.makeconftest("""
         import time
         def pytest_runtest_logfinish(nodeid, location):
@@ -494,7 +495,7 @@ def test_keyboard_interrupt_with_a_slow_reporter(pytester, mode):
     """)
     started = time.monotonic()
     r = run(pytester, *mode, timeout=60)
-    assert time.monotonic() - started < 4.5, r.stdout.str()
+    assert time.monotonic() - started < 15, r.stdout.str()
     assert r.ret == pytest.ExitCode.INTERRUPTED, r.stdout.str()
     out = r.stdout.str()
     assert "did not stop" not in out, out

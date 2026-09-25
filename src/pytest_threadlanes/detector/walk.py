@@ -46,10 +46,11 @@ def _plain(key) -> bool:
 
 
 def _label(key) -> str:
+    """A key's path segment: unique per key, so two keys never share a path."""
     if _plain(key):
         text = repr(key)
-        return text if len(text) <= 80 else text[:77] + "..."
-    return f"<{type(key).__name__}>"
+        return text if len(text) <= 80 else f"{text[:60]}...#{hash(key) & 0xFFFFFFFF:08x}"
+    return f"<{type(key).__name__}@{id(key):#x}>"
 
 
 def _attributes(obj):
@@ -63,6 +64,8 @@ def _attributes(obj):
     for cls in type(obj).__mro__:
         slots = cls.__dict__.get("__slots__", ())
         for name in (slots,) if type(slots) is str else slots:
+            if name.startswith("__") and not name.endswith("__"):   # private: name-mangled
+                name = f"_{cls.__name__.lstrip('_')}{name}"
             member = cls.__dict__.get(name)
             if type(member) is types.MemberDescriptorType:
                 try:

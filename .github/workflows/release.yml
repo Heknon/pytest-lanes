@@ -26,6 +26,11 @@ jobs:
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match pyproject.toml version $version"; exit 1
           fi
+      - name: Release notes from CHANGELOG.md, checked before anything publishes
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          awk -v v="## $version" '$0==v {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "::error::CHANGELOG.md has no '## $version' section"; exit 1; fi
       - run: python -m pip install build twine
       - run: python -m build
       - run: python -m twine check --strict dist/*
@@ -35,6 +40,8 @@ jobs:
           cd /tmp && /tmp/check/bin/python -m pytest --help | grep -- "--lanes=N"
       - uses: actions/upload-artifact@v4
         with: {name: dist, path: dist/}
+      - uses: actions/upload-artifact@v4
+        with: {name: notes, path: notes.md}
 
   test:
     needs: build
@@ -46,12 +53,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with: {name: dist, path: dist/}
       # The built wheel, not the checkout, is what gets tested.
-      - run: pip install "pytest==9.1.1" "pytest-xdist==3.8.0" dist/*.whl pytest-reportlog pytest-rerunfailures pytest-html pytest-timeout pytest-mock pytest-cov
+      - run: pip install "pytest==9.1.1" "pytest-xdist==3.8.0" "$(ls dist/*.whl)[test]"
       - run: python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4
 
   publish:
     needs: test
-    if: startsWith(github.ref, 'refs/tags/')
+    # A tag push only: a manual run started on a tag ref must not publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: {name: pypi, url: "https://pypi.org/project/pytest-threadlanes/"}
     permissions:
@@ -67,12 +75,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: {name: dist, path: dist/}
-      - name: Release with this version's CHANGELOG section
+      - uses: actions/download-artifact@v4
+        with: {name: notes, path: .}
+      - name: GitHub Release with this version's CHANGELOG section
         env: {GH_TOKEN: "${{ github.token }}"}
-        run: |
-          version=${GITHUB_REF_NAME#v}
-          awk -v v="## $version" '$0==v {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md
