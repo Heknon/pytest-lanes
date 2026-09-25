@@ -10,9 +10,15 @@ class EnvScheduling(LoadScopeScheduling):
     def _split_scope(self, nodeid):              # 'test_x.py::test_step[envB-2]' -> 'envB'
         return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
 
+    def _reschedule(self, node):                 # recommended: see README "Scheduling"
+        if node.shutting_down or not self.workqueue or self._pending_of(self.assigned_work[node]) <= 1:
+            super()._reschedule(node)
+
 def pytest_xdist_make_scheduler(config, log):
     return EnvScheduling(config, log)            # don't gate on config.getvalue("dist")
 ```
+
+`_reschedule` is optional but recommended for long tests: xdist's loadscope otherwise queues an environment behind the last two tests of another while other lanes sit idle (round 7, item 50).
 
 | Command | Layout | Scheduler sees |
 |---|---|---|
@@ -53,13 +59,14 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P3 | `LoggingPlugin.caplog_handler` / `report_handler` | Per-lane log capture |
 | P4 | pluggy `_inner_hookexec` | Routes controller hooks to the main thread |
 | P5 | `item._nodeid` | Adds the `@group` suffix under loadgroup, as xdist's worker does |
-| P6 | `_pytest.runner._update_current_test_var`; `os.environ.__class__` | `PYTEST_CURRENT_TEST` per lane, kept out of the process environment (round 1 race; round 6 subprocess EFAULT) |
+| P6 | `_pytest.runner._update_current_test_var`; `os.environ.__class__` | `PYTEST_CURRENT_TEST`, `PYTEST_XDIST_WORKER` and `_COUNT` per lane, kept out of the process environment (round 1 race; round 6 subprocess EFAULT; round 7 worker variables) |
 | P7 | `config._tmp_path_factory` / `_tmpdirhandler` | A basetemp per lane, like xdist's per-worker basetemp; the process's basetemp is created under a lock |
 | P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it at every test phase; views are served from a copy so concurrent logger creation cannot break that |
 | P9 | `_pytest.doctest.DoctestItem` | Doctests run exclusively, because doctest swaps `sys.stdout` for the whole process |
 | P10 | `config.__class__` (per-lane `workerinput`/`workeroutput`) | Each lane is its own xdist worker for `worker_id`, `testrun_uid` and `xdist.get_xdist_worker_id()` |
 | P11 | `WarningsRecorder.__enter__` | Before 3.14: `pytest.warns`/`deprecated_call`/`recwarn` in a non-exclusive test fail with instructions |
 | C1 | pytest-rerunfailures `ClientStatusDB` | Hybrid only; its one per-worker socket is serialized across lanes |
+| C2 | pytest-rerunfailures ≥ 16 `suspended_finalizers` | Per lane: a test about to be rerun parks its setup stack there, and another lane's teardown took it |
 | X1 | xdist scheduler protocol | Semi-public; probed on each scheduler instance |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
@@ -225,7 +232,7 @@ A review of `detector/` found nine defects, all fixed test-first:
 
 The rehearsal on free-threaded 3.14t at 64 environments (`--lanes 64`, `-n 4 --lanes 16`, 5 runs each) was clean: no double or leaked lease, no subprocess failure, report-log identical to `-n 4`. A 6,000-test soak on 200 lanes (subprocesses, child threads, logging, `tmp_path`, `PYTEST_CURRENT_TEST` reads) grew by 37 MB, the same as plain pytest (36 MB: pytest keeps every report for the summary); lanes add a flat 23 MB for 200 threads. A crash under the user's scheduler shape reruns the culprit and the collateral test (F5 corrected).
 
-50. **Scheduling gap in xdist's loadscope (not a lanes bug; same under `-n`).** A node gets its next environment as soon as its pending tests drop to 2, so the environment waits behind up to two tests of another while other nodes go idle: with one-to-two-hour tests, hours. A scheduler that assigns the next environment only when a node has at most one test left (the one a worker holds back until it knows the next, for fixture teardown) removed the wait in a 3-environment experiment (4.1 s to 1.5 s start) in all three modes. At 0 it deadlocks: that held-back test never starts. Environment-level stealing would remove the remaining one-test wait.
+50. **Scheduling gap in xdist's loadscope (not a lanes bug; same under `-n`). README now recommends the fix, tested verbatim in all three modes (`test_recommended_scheduler_does_not_queue_an_environment_behind_another`).** A node gets its next environment as soon as its pending tests drop to 2, so the environment waits behind up to two tests of another while other nodes go idle: with one-to-two-hour tests, hours. A scheduler that assigns the next environment only when a node has at most one test left (the one a worker holds back until it knows the next, for fixture teardown) removed the wait in a 3-environment experiment (4.1 s to 1.5 s start) in all three modes. At 0 it deadlocks: that held-back test never starts. Environment-level stealing would remove the remaining one-test wait.
 
 Review of round 6 (lanes side), all fixed test-first:
 
@@ -281,7 +288,7 @@ Each process costs one interpreter plus a full collection. That was about 40 MB 
 
 So choose P for isolation, and use lanes for throughput. Reasons to raise P:
 
-- **Crash blast radius.** One segfault or OOM fails every in-flight test in that process, so up to M−1 innocent tests are reported as crashed, and they are **not** rerun (verified in round 5: xdist does not reschedule an item that was in flight when its worker died, and every sibling lane's item is such an item). With hour-long tests one crash can fail up to M−1 hours of work. The tests not yet started are rescheduled onto the replacement worker, as under xdist.
+- **Crash blast radius.** One segfault or OOM ends every in-flight test in that process, so up to M−1 innocent tests are reported as crashed, as xdist reports its one crashed test. What happens next is the scheduler's (F5): under a loadscope-based scheduler (the recommended `EnvScheduling`) each of them is run again on the replacement worker, from the step that was running; under `--dist load` they are not. Either way, one crash costs up to M−1 hours of work in flight.
 - **Hang containment.** Threads can't be killed, but a process can. An external watchdog that kills a wedged worker lets xdist replace it and reschedule the work. This is the practical answer to hung tests.
 - **GIL headroom.** If each test's infrastructure spends a fraction c of its time on CPU, one process saturates at roughly 1/c concurrent lanes. For example, 2% CPU per test caps out around 50 lanes per core.
 - **Per-lane fixture memory,** which is multiplied by M within each process.
@@ -307,7 +314,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F2 | **Warnings:** `catch_warnings` isn't thread-safe before Python 3.14. Use `-X context_aware_warnings=1` on 3.14+ (the default on 3.14t), or `-p no:warnings`, which makes `filterwarnings` marks inert. |
 | F3 | **Output from threads your tests spawn** is only attributed with `-X thread_inherit_context=1` on Python 3.14. fd-level writes are never attributed per test. |
 | F4 | **Hung tests:** threads can't be killed. In hybrid mode, use a process watchdog. In single-process mode there's no answer yet. |
-| F5 | **Crash collateral:** in hybrid mode, every in-flight test of a crashed process is reported crashed, since which lane crashed it cannot be told apart. What happens next is the scheduler's, as in xdist. Under a loadscope-based scheduler (loadscope, loadgroup, the user's `EnvScheduling`) the unfinished environments are requeued whole, starting at the step that was running: the culprit is reported crashed and run again, exactly as plain xdist does, and so is each collateral test, with every environment's steps still in order on one lane (round 7, `test_hybrid_crash_collateral_is_reported_and_rerun_under_loadscope`). Under `--dist load` collateral tests are not rerun (round 5); a sibling lane's *next queued* test, not yet started, is reported crashed and dropped (xdist takes a node's first pending item as the one running); and a sibling test whose reports were sent but whose completion was not is reported crashed after passing and run again (31 passed for 30 tests). Backlog 6: annotate collateral reports. |
+| F5 | **Crash collateral:** in hybrid mode, every in-flight test of a crashed process is reported crashed, since which lane crashed it cannot be told apart. What happens next is the scheduler's, as in xdist. Under a loadscope-based scheduler (loadscope, loadgroup, the user's `EnvScheduling`) the unfinished environments are requeued whole, starting at the step that was running: the culprit is reported crashed and run again, exactly as plain xdist does, and so is each collateral test, with every environment's steps still in order on one lane (round 7, `test_hybrid_crash_collateral_is_reported_and_rerun_under_loadscope`). Under `--dist load` collateral tests are not rerun (round 5); a sibling lane's *next queued* test, not yet started, is reported crashed and dropped (xdist takes a node's first pending item as the one running); and a sibling test whose reports were sent but whose completion was not is reported crashed after passing and run again (31 passed for 30 tests). Collateral reports are left exactly as xdist makes them: no annotation (decided in round 7). |
 | F6 | **Exclusive tests pause lanes.** In hybrid mode an exclusive test waits for, and then blocks, every lane in its process; with hour-long tests that can drain the process for hours. Keep `capsys`/`capfd`/`recwarn` tests out of long suites, or run them in a separate plain invocation. |
 | F7 | **`each` and `worksteal` modes are unsupported.** worksteal is implementable. `--pdb` is unsupported, as it is under xdist. |
 | F8 | **Ctrl-C** interrupts every lane and runs its teardown (round 4); a lane blocked in one long C call cannot be interrupted and is abandoned after `lanes_interrupt_grace`, named. SIGTERM kills the process without teardown, as it does plain pytest. |
@@ -328,10 +335,11 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 - A CI matrix: the oldest supported pytest/xdist, the current releases, and pytest plus xdist `main` nightly.
 - Upper-bound pins, raised only after the contract suite passes.
 - A parity job that runs a real slice of your suite under plain `-n`, under `--lanes`, and under `-n --lanes`, then diffs report-log.
-- Upstream candidates: a public per-context SetupState and fixture cache in pytest (removes P1, P2 and P6), a documented node protocol plus a lane-capable worker hook in xdist (removes X1–X4), a `pop(..., None)` fix for `PYTEST_CURRENT_TEST`, and making a worker's INTERNALERROR fail an xdist run (3.8.0 can exit 0).
+- Upstream candidates: a public per-context SetupState and fixture cache in pytest (removes P1, P2 and P6), a documented node protocol plus a lane-capable worker hook in xdist (removes X1–X4), a `pop(..., None)` fix for `PYTEST_CURRENT_TEST` (and keeping it out of the process environment for threaded runners), an atomic `Cache.set`, and making a worker's INTERNALERROR fail an xdist run (3.8.0 can exit 0).
 
 ## Not yet tested
 
-- pytest-cov, Allure, your instrumentation plugin, and your real infrastructure.
+- Your real suite and infrastructure: run `--lanes-detect` on it, then a slice under `-n`, `--lanes` and `-n --lanes`, and diff report-log.
+- Allure. (pytest-cov is in the contract suite since round 7; the failure-instrumentation plugin was smoke-tested in all three modes in rounds 3 and 6, and its lanes design is on its `feature/lanes` branch.)
 - A machine with more than 4 cores.
 - A real watchdog.

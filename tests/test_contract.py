@@ -456,6 +456,51 @@ def test_hybrid_crash_collateral_is_reported_and_rerun_under_loadscope(pytester)
         assert len({w for _, w in steps}) == 1, runs
 
 
+#: The scheduler README.md recommends, verbatim: a lane gets its next environment only
+#: when it has at most one test left (the one a worker holds back until it knows what
+#: comes next). xdist's loadscope tops a node up at two, so an environment could wait
+#: behind two tests of another while other lanes sat idle.
+RECOMMENDED_SCHED = """
+from xdist.scheduler import LoadScopeScheduling
+
+class EnvScheduling(LoadScopeScheduling):
+    def _split_scope(self, nodeid):     # 'test_x.py::test_step[envB-2]' -> 'envB'
+        return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
+
+    def _reschedule(self, node):
+        # Queue the next environment only behind the lane's last test, not its last two.
+        if node.shutting_down or not self.workqueue or self._pending_of(self.assigned_work[node]) <= 1:
+            super()._reschedule(node)
+
+def pytest_xdist_make_scheduler(config, log):
+    return EnvScheduling(config, log)
+"""
+
+
+@pytest.mark.parametrize("mode", [["-n", "2"], ["--lanes", "2"], ["-n", "1", "--lanes", "2"]],
+                         ids=["xdist", "lanes", "hybrid"])
+def test_recommended_scheduler_does_not_queue_an_environment_behind_another(pytester, monkeypatch, mode):
+    # envA: a short step, then two long ones. With stock loadscope, envC is queued on
+    # envA's lane as soon as envA has two tests left, and waits there while the other
+    # lane finishes envB and sits idle (round 7, DESIGN.md item 50).
+    stamps = stamps_dir(pytester, monkeypatch)
+    pytester.makeconftest(RECOMMENDED_SCHED)
+    pytester.makepyfile("""
+        import time, pytest
+        from stamping import stamped
+        PLAN = {"envA": [0.05, 1.0, 1.0], "envB": [0.3, 0.3, 0.3], "envC": [0.3]}
+        @pytest.mark.parametrize("env,step", [(e, i) for e, d in PLAN.items() for i in range(len(d))],
+                                 ids=[f"{e}-{i}" for e, d in PLAN.items() for i in range(len(d))])
+        def test_step(env, step, request):
+            with stamped(request):
+                time.sleep(PLAN[env][step])
+    """)
+    run(pytester, *mode, timeout=60).assert_outcomes(passed=7)
+    times = {f.name.split("[")[1].rstrip("]"): tuple(map(float, f.read_text().split()[:2]))
+             for f in stamps.iterdir()}
+    assert times["envC-0"][0] < times["envA-2"][1], times     # envC did not wait for envA
+
+
 def test_hybrid_capsys_runs_exclusively_inside_worker(pytester):
     pytester.makepyfile("""
         import time, pytest

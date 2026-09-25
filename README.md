@@ -34,13 +34,13 @@ Required flags, which the plugin checks and refuses to run without:
 | Python 3.14 or later | `-X context_aware_warnings=1` or `PYTHON_CONTEXT_AWARE_WARNINGS=1`. It is the default on free-threaded 3.14t |
 | pytest 8.3.5 or earlier | `-p no:threadexception -p no:unraisableexception`, because those versions swap global hooks around every test |
 
-Tested on CPython 3.12, 3.13, 3.14 and 3.14t, with pytest 8.0.2 / 8.3.5 / 9.1.1 and pytest-xdist 3.6.1 / 3.8.0.
+Supported: pytest 8.x–9.x and pytest-xdist 3.6–3.x (`pyproject.toml`). Tested on CPython 3.12, 3.13, 3.14 and 3.14t, with pytest 8.0.2 / 8.3.5 / 9.1.1 and pytest-xdist 3.6.1 / 3.8.0; other versions in range are untested, and a changed internal makes the plugin refuse to start rather than run incorrectly.
 
 ## Using it
 
 ### Scheduling
 
-Scheduling works exactly as in xdist, and one scheduler definition serves all three modes:
+Scheduling works exactly as in xdist, and one scheduler definition serves all three modes. The recommended one for environments:
 
 ```python
 # conftest.py
@@ -50,15 +50,24 @@ class EnvScheduling(LoadScopeScheduling):
     def _split_scope(self, nodeid):     # 'test_x.py::test_step[envB-2]' -> 'envB'
         return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
 
+    def _reschedule(self, node):
+        # Queue the next environment only behind the lane's last test, not its last two.
+        if node.shutting_down or not self.workqueue or self._pending_of(self.assigned_work[node]) <= 1:
+            super()._reschedule(node)
+
 def pytest_xdist_make_scheduler(config, log):
     return EnvScheduling(config, log)
 ```
 
-Tests in one scope run sequentially, in order, on one lane; different scopes run in parallel. Without a custom scheduler, choose a built-in one:
+Tests in one scope run sequentially, in order, on one lane; different scopes run in parallel.
+
+Why `_reschedule`: xdist's loadscope gives a lane (or worker) its next environment as soon as its current one is down to two tests, so that environment waits behind both while other lanes may sit idle. With hour-long tests that is hours. The override waits until one test is left. It cannot wait for zero: a lane, like an xdist worker, starts its last queued test only once it knows what comes next (to decide which fixtures to tear down), so at zero it would never finish. The override behaves the same under plain `-n`. It uses loadscope's private `_reschedule`, `_pending_of` and `assigned_work`; `tests/test_contract.py` runs it verbatim in all three modes, so a change in xdist shows up in `scripts/matrix.sh`.
+
+Without a custom scheduler, choose a built-in one:
 - Single-process mode: `--dist` as with xdist, or `--lanes-dist load|loadscope|loadfile|loadgroup` (default `load`).
 - Hybrid mode: xdist's own `--dist`.
 
-`each` and `worksteal` are not supported yet.
+`each` and `worksteal` are not supported yet, and are refused at startup. Note that xdist's `worksteal` moves single tests between workers, so it would split an environment's steps across lanes; for environments only a steal of whole, not-yet-started scopes would be safe (backlog 7).
 
 ### Options
 
@@ -87,10 +96,10 @@ Lanes are threads, so anything process-global is shared between concurrently run
 
 Other limits:
 - A hung thread cannot be killed. pytest-timeout is refused in single-process mode (on a timeout it would end the whole process) but works in hybrid mode, where xdist replaces the worker. `faulthandler_timeout` is refused in both modes.
-- A crash takes down every lane in its process.
+- A crash takes down every lane in its process: every test in flight there is reported as crashed, as xdist reports the one test of a crashed worker. Under a loadscope-based scheduler each of them is then run again, from the step that was running, as xdist does for its crashed test. Choose `-n` for the blast radius you accept (see DESIGN.md → Sizing).
 - Output from threads your tests start is attributed to the test only on Python 3.14 with `-X thread_inherit_context=1`.
 - Before Python 3.14, `pytest.warns`, `pytest.deprecated_call` and `recwarn` change process-wide warning state, so a test using them must be `lanes_exclusive`. Otherwise it fails and says so. `warnings.catch_warnings` used directly is not guarded.
-- `--pdb` is unsupported, as it is under xdist. So is `--trace` in single-process mode.
+- `--pdb` is unsupported, as it is under xdist, and so is `--trace` in single-process mode; a `breakpoint()` on a lane cannot read the terminal either. To debug a test, run it without `--lanes` (and without `-n`): the same scheduler, fixtures and code, in plain pytest.
 
 The full list, with workarounds, is in [DESIGN.md → Flags](DESIGN.md#flags-no-complete-fix).
 
@@ -143,7 +152,7 @@ Two problems have to be solved to run many pytest tests at once in one process:
 1. **pytest keeps per-run state that assumes one test at a time.** This covers `SetupState`, fixture caches, capture, log handlers and a couple of races. `isolation.py` and `capture.py` re-key each of these by the current lane, using a contextvar (`LANE`) that is set on each lane thread.
 2. **Reporters expect one thread and xdist's hook split.** xdist forwards exactly four hooks from workers to the controller: `pytest_runtest_logstart`, `logreport`, `logfinish` and `warning_recorded`. `hookrouting.py` intercepts those four on lanes, queues them, and the main thread replays them in order. Every other hook runs on the lane, as it would in a worker.
 
-Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P11, X1–X4, C1), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
+Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P15, C1–C2, X1–X4), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
 
 ### The life of one test (`--lanes N`)
 
@@ -175,15 +184,17 @@ src/pytest_lanes/
   worker.py        -n P --lanes M, worker process                       (X2)
   controller.py    -n P --lanes M, controller: LanesController, LaneMux  (X3, X4)
   scheduling.py    building xdist's scheduler; loadgroup suffix          (X1, P5)
-  isolation.py     per-lane pytest state, worker identity, warns guard   (P1, P2, P6, P7, P10, P11)
-  capture.py       per-lane stdout/stderr and logging                    (P3, P8)
+  isolation.py     per-lane pytest state, worker identity and environment,
+                   warns guard, patch guard                              (P1, P2, P6, P7, P10, P11, P12, P14)
+  capture.py       per-lane stdout/stderr, redirects and logging          (P3, P8, P13, P15)
   hookrouting.py   the 4 controller hooks, replayed on the main thread   (P4)
-  compat.py        shims for third-party plugins (pytest-rerunfailures)  (C1)
+  compat.py        shims for third-party plugins (pytest-rerunfailures)  (C1, C2)
   integrity.py     run-time check: reports match what lanes ran, else INTERNALERROR
   detector/        --lanes-detect, a separate debugging tool: walk, sources, recorder (D1),
                    classify, report, plugin
   probes.py        fail-closed startup checks
-tests/test_contract.py   the spec: pytester subprocess tests, incl. parity against plain -n
+tests/                   the spec: pytester subprocess tests (contract, parity against plain -n,
+                         robustness, isolation, integrity, patch guard, detector)
 scripts/matrix.sh        contract suite across Python x pytest/xdist versions (uv)
 demo/                    manual smoke run (see demo/README.md)
 ```
@@ -204,7 +215,7 @@ demo/                    manual smoke run (see demo/README.md)
 
 ```bash
 uv venv -p 3.12 .venv && uv pip install -p .venv -e ".[test]"
-.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings   # contract suite, ~25s
+.venv/bin/python -m pytest tests -q -p no:cacheprovider -p no:warnings -n 4   # ~300 tests, ~2 min
 scripts/matrix.sh                 # 3.12 3.13 3.14 3.14t x 3 pytest/xdist combos (needs PyPI)
 RUNS=20 scripts/matrix.sh 3.14t   # repeat runs on one interpreter
 ```
@@ -213,7 +224,7 @@ Rules that keep it correct:
 - **The contract tests are the spec.** Every fix starts with a contract test that fails without it.
 - **Run on at least two pytest versions** before calling anything done. Free-threaded 3.14t is the best race detector.
 - **Contract tests use `runpytest_subprocess`, never in-process pytester.** In-process runs would share the patched `FixtureDef` class and the global hooks.
-- **Never weaken the invariants.** They are listed in CLAUDE.md: indistinguishable from an xdist worker, report parity, fail closed, xdist-observing plugins keep working, and no new process-global state in the runner.
+- **Never weaken the invariants.** They are listed in CLAUDE.md: indistinguishable from an xdist worker, report parity, fail closed, xdist-observing plugins keep working, no new process-global state in the runner, and silent corruption made loud.
 
 ## Documents
 
