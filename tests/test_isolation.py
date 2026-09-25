@@ -252,7 +252,10 @@ def test_pytest_warns_fails_closed_without_context_aware_warnings(pytester, monk
     pytester.makepyfile(WARNS_TESTS)
     r = run(pytester, *mode, "-rf", timeout=60)
     r.assert_outcomes(passed=1, failed=2)
-    assert r.stdout.str().count("mark it @pytest.mark.lanes_exclusive") == 2, r.stdout.str()
+    # Each failure section says why; the -rf summary repeats it only where not truncated (CI).
+    reasons = [ln for ln in r.stdout.lines if ln.startswith("pytest-threadlanes: pytest.warns")]
+    assert len(reasons) == 2 and all("mark it @pytest.mark.lanes_exclusive" in ln for ln in reasons), \
+        r.stdout.str()
 
 
 def test_pytest_warns_runs_normally_with_context_aware_warnings(pytester, monkeypatch):
