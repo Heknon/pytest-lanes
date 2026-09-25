@@ -67,6 +67,8 @@ Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if 
 | P11 | `WarningsRecorder.__enter__` | Before 3.14: `pytest.warns`/`deprecated_call`/`recwarn` in a non-exclusive test fail with instructions |
 | C1 | pytest-rerunfailures `ClientStatusDB` | Hybrid only; its one per-worker socket is serialized across lanes |
 | C2 | pytest-rerunfailures ≥ 15 `suspended_finalizers` | Per lane: a test about to be rerun parks its setup stack there, and another lane's teardown took it |
+| C3 | pytest-metadata `metadata_key` | Seeds each lane's `workeroutput["metadata"]`, which a worker-side `pytest_configure` would have written |
+| C4 | pytest-cov `cov_controller` | Lanes' node hooks skip pytest-cov while it measures locally (its node hooks drive its distributed engine) |
 | X1 | xdist scheduler protocol | Semi-public; checked on each scheduler instance, in both modes |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
@@ -135,7 +137,7 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | Class | Single-process lanes | Hybrid |
 |---|---|---|
 | A: report consumers (terminal, junitxml, report-log, html) | Work | Work |
-| B: xdist observers (`report.node`, node hooks) | `report.node` is the lane; node hooks only via opt-in allowlist | Real xdist node hooks (per process); `report.lane_id` gives the lane |
+| B: xdist observers (`report.node`, node hooks) | `report.node` is the lane; every lane is a node for xdist's controller hooks (`configure_node`, `testnodeready`, `node_collection_finished`, `testnodedown`), with `workerinput`/`workeroutput` | Real xdist node hooks (per process); `report.lane_id` gives the lane |
 | C: xdist protocol users (pytest-cov, pytest-metadata) | Run in single-process mode | See a normal xdist run |
 | D: execution-side plugins | Run concurrently in threads, so must be thread-safe | Same |
 

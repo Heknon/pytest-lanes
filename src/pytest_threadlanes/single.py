@@ -7,10 +7,9 @@ afterwards on one extra lane, ``ln-serial``.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
+from .compat import node_hook_callers
 from .runner import LaneRunner
 from .scheduling import add_group_suffix, builtin_dist, make_scheduler
 
@@ -52,19 +51,18 @@ class SingleProcessSession(LaneRunner):
         parallel = [it for it in session.items if not self.is_exclusive(it)]
         serial = [it for it in session.items if self.is_exclusive(it)]
         nodes = [self.new_node(f"ln{i}") for i in range(self.n)]
-        node_hooks = self._node_hook_callers()
-        if node_hooks:
-            for n in nodes:
-                node_hooks.ready(node=n)
+        ids = [it.nodeid for it in session.items]
+        self.node_hooks = node_hook_callers(self.config)
+        for n in nodes:
+            self._node_up(n, ids)
         try:
             if parallel:
                 self._run_parallel(session, nodes, parallel)
             if serial and not self.stop.is_set():
                 self._run_serial(session, serial)
         finally:
-            if node_hooks:
-                for n in nodes:
-                    node_hooks.down(node=n, error=None)
+            for n in self.nodes:            # ln-serial too, if it ran
+                self.node_hooks["pytest_testnodedown"](node=n, error=None)
 
         if not self.stopping(session):
             from xdist.scheduler import LoadScopeScheduling
@@ -95,25 +93,18 @@ class SingleProcessSession(LaneRunner):
 
     def _run_serial(self, session, items) -> None:
         node = self.new_node("ln-serial")
+        self._node_up(node, [it.nodeid for it in session.items])
         node.send_runtest_some(range(len(items)))
         node.shutdown()
         self._pump([self.start(node, items)], None, session, [node])
 
-    def _node_hook_callers(self):
-        """xdist's testnodeready/testnodedown, restricted to allowlisted plugins.
-
-        Off unless --lanes-xdist-node-hooks. Restricted because some plugins use
-        these hooks as a process protocol (pytest-metadata reads worker output in
-        testnodedown and crashed when it got a lane).
-        """
-        hooks = self.config.hook
-        if not (self.config.getoption("lanes_xdist_node_hooks") and hasattr(hooks, "pytest_testnodeready")):
-            return None
-        pm = self.config.pluginmanager
-        allow = self.config.getini("lanes_node_hook_plugins")
-        others = [p for name, p in pm.list_name_plugin()
-                  if p is not None and not any(tok in str(name) for tok in allow)]
-        return SimpleNamespace(
-            ready=pm.subset_hook_caller("pytest_testnodeready", remove_plugins=others),
-            down=pm.subset_hook_caller("pytest_testnodedown", remove_plugins=others),
-        )
+    def _node_up(self, node, ids) -> None:
+        """xdist's controller hooks for a new node, in DSession's order: configure_node
+        (plugins add to ``node.workerinput``), testnodeready, node_collection_finished.
+        pytest_testnodedown follows when the run ends. Plugins built on xdist's node
+        protocol (the failure-instrumentation plugin, pytest-metadata) see each lane as
+        a worker, as under ``-n``."""
+        hooks = self.node_hooks
+        hooks["pytest_configure_node"](node=node)
+        hooks["pytest_testnodeready"](node=node)
+        hooks["pytest_xdist_node_collection_finished"](node=node, ids=ids)

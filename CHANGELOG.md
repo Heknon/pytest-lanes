@@ -11,7 +11,9 @@ First release.
 - Three modes from one xdist scheduler: `-n P` (plain xdist), `--lanes N` (one process,
   N thread lanes) and `-n P --lanes M` (P xdist processes × M lanes).
 - A lane behaves like an xdist worker: xdist's own scheduler decides, fixtures of every
-  scope are cached per lane, and reporters see xdist's hook split. Report-log output is
+  scope are cached per lane, reporters see xdist's hook split, and with `--lanes` alone
+  every lane is a node for xdist's controller hooks (`pytest_configure_node`,
+  `pytest_testnodeready`, `pytest_xdist_node_collection_finished`, `pytest_testnodedown`). Report-log output is
   identical in all three modes.
 - Fail closed: every pytest, pluggy and xdist internal used is probed at startup.
 - Run-time integrity check: a report stream that does not match what the lanes ran fails

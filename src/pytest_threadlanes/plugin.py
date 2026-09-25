@@ -49,10 +49,6 @@ def pytest_addoption(parser):
                 help="built-in xdist scheduler for single-process mode when no "
                      "pytest_xdist_make_scheduler implementation returns one "
                      "(default: xdist's --dist if given, else load)")
-    g.addoption("--lanes-xdist-node-hooks", action="store_true", default=False,
-                help="fire xdist node hooks (testnodeready/down) to plugins in lanes_node_hook_plugins")
-    parser.addini("lanes_node_hook_plugins", "plugin names (substring match) that receive xdist "
-                  "node hooks; others never see them", type="args", default=["conftest"])
     parser.addini("lanes_exclusive_fixtures", "fixtures forcing a test into the serial phase",
                   type="args", default=list(DEFAULT_EXCLUSIVE))
     g.addoption("--lanes-allow-patches", action="store_true", default=False,

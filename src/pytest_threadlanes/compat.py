@@ -1,5 +1,16 @@
 """Compatibility with third-party plugins that assume one test at a time per process.
 
+C4 pytest-cov: in one process it measures with its local engine (``Central``), which
+already traces every lane's thread; its xdist node hooks drive its distributed engine
+(``DistMaster``), which is not running, and fail on the local one. Lanes' node hooks
+skip it in exactly that case (``node_hook_callers``), as plain pytest-cov never sees
+node hooks without ``-n``.
+
+C3 pytest-metadata: under xdist its worker-side ``pytest_configure`` puts the metadata in
+``config.workeroutput``, and the controller's ``pytest_testnodedown`` reads it from each
+node. A lane has no worker-side configure (one process configures once), so each lane's
+``workeroutput`` is seeded with it (``seed_worker_output``).
+
 C2 pytest-rerunfailures >= 15: its module-level ``suspended_finalizers`` is made per
 lane (``per_lane_rerun_suspended_finalizers``).
 
@@ -128,3 +139,41 @@ def per_lane_rerun_suspended_finalizers():
         yield
     finally:
         rf.suspended_finalizers = original
+
+
+# ---------------------------------------------------------------- C3 pytest-metadata
+def metadata_plugin_key(config):
+    """pytest-metadata's stash key, when the plugin is active (None otherwise)."""
+    plugin = config.pluginmanager.get_plugin("metadata")
+    return getattr(plugin, "metadata_key", None) if plugin is not None else None
+
+
+def seed_worker_output(config, workeroutput: dict) -> None:
+    """C3: what worker-side plugins write into ``config.workeroutput`` during their
+    ``pytest_configure``, which a lane never runs (the process configured once)."""
+    key = metadata_plugin_key(config)
+    if key is not None and key in config.stash:
+        workeroutput["metadata"] = config.stash[key]
+
+
+# ---------------------------------------------------------------- C4 pytest-cov
+NODE_HOOKS = ("pytest_configure_node", "pytest_testnodeready",
+              "pytest_xdist_node_collection_finished", "pytest_testnodedown")
+
+
+def local_coverage_plugin(config):
+    """pytest-cov's plugin when it measures locally (no distributed engine), else None."""
+    plugin = config.pluginmanager.get_plugin("_cov")
+    controller = getattr(plugin, "cov_controller", None)
+    if controller is None or hasattr(controller, "configure_node"):
+        return None
+    return plugin
+
+
+def node_hook_callers(config) -> dict:
+    """xdist's controller hooks for lanes (single-process mode): every plugin, except
+    pytest-cov's hooks while it measures locally (C4)."""
+    skip = [p for p in (local_coverage_plugin(config),) if p is not None]
+    pm = config.pluginmanager
+    return {name: pm.subset_hook_caller(name, remove_plugins=skip) if skip else getattr(config.hook, name)
+            for name in NODE_HOOKS}

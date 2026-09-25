@@ -131,22 +131,58 @@ def test_rerunfailures_protocol_plugin(pytester):
     assert o.get("passed") == 2 and o.get("rerun") == 2, o
 
 
-def test_node_hooks_opt_in_for_observers(pytester):
-    pytester.makeconftest(
-        """
-        SEEN = []
-        def pytest_testnodeready(node): SEEN.append(("up", node.gateway.id))
-        def pytest_testnodedown(node, error): SEEN.append(("down", node.gateway.id))
-        def pytest_runtest_logreport(report):
-            if report.when == "call":
-                SEEN.append(("rep", report.node.workerinput["workerid"]))
-        def pytest_sessionfinish(session):
-            print("\\nSEEN", sorted(set(k for k, _ in SEEN)))
-        """
-    )
-    pytester.makepyfile("def test_a(): pass\ndef test_b(): pass")
-    r = run(pytester, "--lanes", "2", "--lanes-xdist-node-hooks", "-s")
-    r.stdout.fnmatch_lines(["*SEEN*'down', 'rep', 'up'*"])
+XDIST_PROTOCOL_PLUGIN = """
+import json, os, pytest
+EVENTS = []
+
+def pytest_configure_node(node):                  # controller: data for the worker
+    node.workerinput["token"] = "T-" + node.gateway.id
+
+def pytest_testnodeready(node):
+    EVENTS.append(["ready", node.gateway.id == node.workerinfo["id"]])
+
+def pytest_xdist_node_collection_finished(node, ids):
+    EVENTS.append(["collected", len(ids)])
+
+def pytest_testnodedown(node, error):             # controller: the worker's output
+    EVENTS.append(["down", node.workeroutput.get("seen") == "T-" + node.gateway.id])
+
+@pytest.fixture(autouse=True)
+def worker_side(request):                         # worker: reads workerinput, writes workeroutput
+    config = request.config
+    config.workeroutput["seen"] = config.workerinput["token"]
+
+def pytest_sessionfinish(session):
+    if not hasattr(session.config, "workerinput"):
+        with open(os.path.join(os.environ["LANES_OUT"], "events.json"), "w") as f:
+            json.dump(sorted(EVENTS), f)
+"""
+
+
+@pytest.mark.parametrize("mode", [["-n", "2"], ["--lanes", "2"]], ids=["xdist", "lanes"])
+def test_xdist_node_protocol_in_every_mode(pytester, monkeypatch, mode):
+    # xdist's controller hooks (configure_node, testnodeready, node_collection_finished,
+    # testnodedown) with the workerinput/workeroutput protocol: plugins built on it (the
+    # failure-instrumentation plugin, pytest-metadata) must work under --lanes alone too.
+    monkeypatch.setenv("LANES_OUT", str(pytester.path))
+    pytester.makeconftest(XDIST_PROTOCOL_PLUGIN)
+    pytester.makepyfile("import pytest\n@pytest.mark.parametrize('i', range(4))\ndef test_t(i): pass\n")
+    run(pytester, *mode).assert_outcomes(passed=4)
+    events = json.loads((pytester.path / "events.json").read_text())
+    assert events == sorted([["ready", True]] * 2 + [["collected", 4]] * 2 + [["down", True]] * 2), events
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "1", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_metadata_and_html_with_node_hooks(pytester, mode):
+    # pytest-metadata reads node.workeroutput["metadata"] in testnodedown, which its worker
+    # side writes in pytest_configure: given node hooks, it crashed on a lane.
+    pytest.importorskip("pytest_metadata")
+    pytest.importorskip("pytest_html")
+    pytester.makepyfile("def test_a(): pass\ndef test_b(): pass\n")
+    r = run(pytester, *mode, f"--html={pytester.path / 'r.html'}")
+    r.assert_outcomes(passed=2)
+    assert "INTERNALERROR" not in r.stdout.str() + r.stderr.str()
+    assert "Python" in (pytester.path / "r.html").read_text()     # the metadata table
 
 
 def test_fail_closed_on_unsafe_warnings(pytester, monkeypatch):

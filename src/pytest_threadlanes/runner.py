@@ -36,6 +36,7 @@ from typing import NamedTuple
 import pytest
 
 from .capture import capture_phase
+from .compat import seed_worker_output
 from .hookrouting import ControllerHookRouter, HookCall
 from .integrity import Ledger, StdioWatch
 from .isolation import isolate_lanes, show_unmatched_warnings_always
@@ -148,6 +149,8 @@ class LaneRunner:
     def new_node(self, id_: str) -> ThreadNode:
         node = ThreadNode(id_, self.lane_workerinput(id_), setupstate=self.lane_state.setupstate(),
                           log_handlers=self.lane_state.log_handlers())
+        node.config = self.config                  # as xdist's WorkerController
+        seed_worker_output(self.config, node.workeroutput)
         self.nodes.append(node)
         return node
 

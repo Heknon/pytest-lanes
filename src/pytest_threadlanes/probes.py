@@ -80,6 +80,23 @@ def _c1_rerunfailures_client(config):
     return None
 
 
+def _c3_metadata(config):
+    from .compat import metadata_plugin_key
+
+    if config.pluginmanager.get_plugin("metadata") is None:
+        return None
+    if not isinstance(metadata_plugin_key(config), pytest.StashKey):
+        return "C3 pytest-metadata metadata_key (a lane's workeroutput['metadata'])"
+    return None
+
+
+def _c4_coverage(config):
+    plugin = config.pluginmanager.get_plugin("_cov")
+    if plugin is not None and not hasattr(plugin, "cov_controller"):
+        return "C4 pytest-cov plugin.cov_controller (which engine is measuring)"
+    return None
+
+
 def _c2_rerunfailures_suspended_finalizers(config):
     from .compat import rerunfailures_module
 
@@ -291,7 +308,7 @@ CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p5_group_su
           _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect, _p14_patch_guard, _p15_capture_suspend,
           _x2_worker_interactor,
           _x1_xdist_scheduler_api,
-          _c1_rerunfailures_client, _c2_rerunfailures_suspended_finalizers,
+          _c1_rerunfailures_client, _c2_rerunfailures_suspended_finalizers, _c3_metadata, _c4_coverage,
           _pytest_timeout, _faulthandler_timeout)
 
 
