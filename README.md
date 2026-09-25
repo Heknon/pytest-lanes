@@ -18,6 +18,7 @@ A lane behaves like an xdist worker. Scheduling decisions come from xdist's real
 - [How it works](#how-it-works)
 - [Finding your way around](#finding-your-way-around)
 - [Developing](#developing)
+- [Releasing](#releasing)
 - [Documents](#documents)
 
 ## Quick start
@@ -103,7 +104,7 @@ Other limits:
 - Before Python 3.14, `pytest.warns`, `pytest.deprecated_call` and `recwarn` change process-wide warning state, so a test using them must be `lanes_exclusive`. Otherwise it fails and says so. `warnings.catch_warnings` used directly is not guarded.
 - `--pdb` is unsupported, as it is under xdist, and so is `--trace` in single-process mode; a `breakpoint()` on a lane cannot read the terminal either. To debug a test, run it without `--lanes` (and without `-n`): the same scheduler, fixtures and code, in plain pytest.
 
-The full list, with workarounds, is in [DESIGN.md → Flags](DESIGN.md#flags-no-complete-fix).
+The full list, with workarounds, is in [DESIGN.md → Flags](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/DESIGN.md#flags-no-complete-fix).
 
 ### Finding shared state: `--lanes-detect`
 
@@ -154,7 +155,7 @@ Two problems have to be solved to run many pytest tests at once in one process:
 1. **pytest keeps per-run state that assumes one test at a time.** This covers `SetupState`, fixture caches, capture, log handlers and a couple of races. `isolation.py` and `capture.py` re-key each of these by the current lane, using a contextvar (`LANE`) that is set on each lane thread.
 2. **Reporters expect one thread and xdist's hook split.** xdist forwards exactly four hooks from workers to the controller: `pytest_runtest_logstart`, `logreport`, `logfinish` and `warning_recorded`. `hookrouting.py` intercepts those four on lanes, queues them, and the main thread replays them in order. Every other hook runs on the lane, as it would in a worker.
 
-Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P15, C1–C2, X1–X4), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](DESIGN.md#private-touchpoints).
+Doing this touches pytest, pluggy and xdist internals. Each one is a numbered **touchpoint** (P1–P15, C1–C2, X1–X4), is checked at startup by `probes.py`, and makes the plugin refuse to run if it has changed. That is the fail-closed rule. The list and the reasons are in [DESIGN.md → Private touchpoints](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/DESIGN.md#private-touchpoints).
 
 ### The life of one test (`--lanes N`)
 
@@ -228,10 +229,35 @@ Rules that keep it correct:
 - **Contract tests use `runpytest_subprocess`, never in-process pytester.** In-process runs would share the patched `FixtureDef` class and the global hooks.
 - **Never weaken the invariants.** They are listed in CLAUDE.md: indistinguishable from an xdist worker, report parity, fail closed, xdist-observing plugins keep working, no new process-global state in the runner, and silent corruption made loud.
 
+## Releasing
+
+The version lives only in `pyproject.toml`. A release is a tag `vX.Y.Z` that matches it; pushing the tag runs `.github/workflows/release.yml`:
+
+1. **build**: checks the tag against `pyproject.toml`, builds the wheel and sdist, `twine check --strict`, and loads the plugin from the installed wheel;
+2. **test**: the suite once (Python 3.12, pytest 9.1.1, xdist 3.8.0), against the built wheel;
+3. **publish**: to PyPI with Trusted Publishing (no token is stored in GitHub);
+4. **github-release**: a GitHub Release with the wheel, the sdist, and the version's `CHANGELOG.md` section as notes.
+
+To release:
+
+```bash
+# 1. bump version in pyproject.toml and add a "## X.Y.Z" section to CHANGELOG.md
+scripts/matrix.sh                         # the real gate: 3.12-3.14t x pytest/xdist combos
+git commit -am "Release X.Y.Z" && git push
+git tag vX.Y.Z && git push origin vX.Y.Z  # starts the release workflow
+```
+
+A manual run of the workflow (Actions → release → Run workflow) builds and tests without publishing: a dry run.
+
+One-time setup, before the first release:
+- On pypi.org → Your account → Publishing → *Add a new pending publisher*: project `pytest-threadlanes`, owner `Heknon`, repository `pytest-threadlanes`, workflow `release.yml`, environment `pypi`.
+- In the GitHub repository → Settings → Environments, create `pypi`. Adding yourself as a required reviewer there makes every publish wait for your approval.
+
 ## Documents
 
 | File | For |
 |---|---|
 | README.md | This overview: using the plugin, how it works, where things are |
-| [DESIGN.md](DESIGN.md) | Rationale and evidence: touchpoints and why each exists, what was found and fixed, sizing processes × lanes, plugin compatibility, known limitations |
-| [CLAUDE.md](CLAUDE.md) | Maintainer and agent brief: invariants, touchpoint table, verified status, prioritized backlog with acceptance criteria |
+| [DESIGN.md](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/DESIGN.md) | Rationale and evidence: touchpoints and why each exists, what was found and fixed, sizing processes × lanes, plugin compatibility, known limitations |
+| [CHANGELOG.md](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/CHANGELOG.md) | What changed in each release |
+| [CLAUDE.md](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/CLAUDE.md) | Maintainer and agent brief: invariants, touchpoint table, verified status, prioritized backlog with acceptance criteria |

@@ -1,12 +1,32 @@
 [project]
 name = "pytest-threadlanes"
-version = "0.0.1"
+version = "0.1.0"           # the only place the version lives; release.yml checks the tag against it
 description = "Run pytest-xdist schedulers on thread lanes: in one process, or many processes x many lanes"
+readme = "README.md"
+authors = [{ name = "Heknon" }]
+keywords = ["pytest", "xdist", "threads", "parallel", "concurrency"]
+classifiers = [
+    "Framework :: Pytest",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading",
+    "Topic :: Software Development :: Testing",
+]
 requires-python = ">=3.9"   # tested: 3.12, 3.13, 3.14, 3.14t
 dependencies = [
     "pytest>=8.0,<10",       # tested: 8.0.2, 8.3.5, 9.1.1. Raise the cap only after tests/ passes.
     "pytest-xdist>=3.6,<4",  # tested: 3.6.1, 3.8.0
 ]
+
+[project.urls]
+Homepage = "https://github.com/Heknon/pytest-threadlanes"
+Documentation = "https://github.com/Heknon/pytest-threadlanes#readme"
+Changelog = "https://github.com/Heknon/pytest-threadlanes/blob/HEAD/CHANGELOG.md"
+Issues = "https://github.com/Heknon/pytest-threadlanes/issues"
 
 [project.optional-dependencies]
 test = ["pytest-reportlog", "pytest-rerunfailures", "pytest-html", "pytest-timeout", "pytest-mock", "pytest-cov"]

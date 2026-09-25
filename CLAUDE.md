@@ -69,6 +69,7 @@ Other files:
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is the CI workflow, run by hand only (`workflow_dispatch`): GitHub runners are paid.
+- `.github/workflows/release.yml` publishes to PyPI (Trusted Publishing) and makes a GitHub Release when a `vX.Y.Z` tag matching `pyproject.toml`'s version is pushed; it tests the built wheel on one combo first. A manual run is a dry run. `CHANGELOG.md` gets a section per release (README → Releasing). Never push a release tag without the user's go-ahead: it publishes.
 
 ## Internal touchpoints
 
