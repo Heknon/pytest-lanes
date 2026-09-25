@@ -66,8 +66,15 @@ class HybridWorkerSession(LaneRunner):
                 for n in nodes:
                     n.shutdown()
 
-        interactor.channel.setcallback(on_command, endmarker=end_of_channel)
-        threads = [self.start(n, session.items) for n in nodes]
+        threads: list = []
+        try:
+            for n in nodes:
+                threads.append(self.start(n, session.items))
+            interactor.channel.setcallback(on_command, endmarker=end_of_channel)
+        except KeyboardInterrupt:           # before the pump: lanes may already run tests
+            self._interrupt(threads, nodes[:len(threads)])
+            raise
+        by_id = {n.gateway.id: n for n in nodes}
         index_of = {it.nodeid: i for i, it in enumerate(session.items)}
 
         def on_done(node, index, duration):  # the event xdist's worker sends after each item
@@ -75,7 +82,13 @@ class HybridWorkerSession(LaneRunner):
 
         def before_replay(call):
             if call.name == "pytest_runtest_logreport":
-                interactor.item_index = index_of[call.kwargs["report"].nodeid]
+                # The lane's own item (right for duplicated nodeids too); a report naming
+                # another test (the integrity check's case) by that test's index.
+                nodeid = call.kwargs["report"].nodeid
+                index = by_id[call.lane].current_index
+                if index is None or session.items[index].nodeid != nodeid:
+                    index = index_of[nodeid]
+                interactor.item_index = index
 
         self._pump(threads, None, session, nodes, on_done=on_done, before_replay=before_replay)
         return True

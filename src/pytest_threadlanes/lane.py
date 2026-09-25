@@ -67,6 +67,7 @@ class ThreadNode:
         # This lane's own values of PER_LANE_ENVIRON keys, as os.environ shows them on the
         # lane (isolation.py, P6); None: deleted. A key not here has its default.
         self.environ: dict = {}
+        self.current_index = None       # the item index this lane runs or last ran (hybrid reports)
         self.out = io.StringIO()
         self.err = io.StringIO()
         # contextlib.redirect_stdout/stderr targets entered on this lane, innermost last

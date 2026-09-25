@@ -11,7 +11,7 @@ X2 (hybrid worker) is resolved where it is used. X3 and X4 (hybrid controller)
 are checked by ``check_controller_touchpoints``.
 
 Not probed (a gap carried over from the original single-file plugin): P1
-``session._setupstate`` and P5 ``item._nodeid``. The contract tests cover both.
+``session._setupstate``, which the contract tests cover.
 """
 from __future__ import annotations
 
@@ -154,6 +154,19 @@ def _p4_hookexec(config):
     return None
 
 
+def _p5_group_suffix(config):
+    import inspect
+
+    try:
+        from xdist.remote import WorkerInteractor
+        params = list(inspect.signature(WorkerInteractor.pytest_collection_modifyitems).parameters)
+    except (ImportError, AttributeError, TypeError, ValueError) as e:
+        return f"P5 xdist.remote.WorkerInteractor.pytest_collection_modifyitems ({e})"
+    if params != ["self", "config", "items"]:
+        return f"P5 xdist.remote.WorkerInteractor.pytest_collection_modifyitems signature {params}"
+    return None
+
+
 def _p6_current_test_var(config):
     import os
     from types import SimpleNamespace
@@ -259,7 +272,7 @@ def _per_test_global_hooks(config):
     return "\n  ".join(problems) or None
 
 
-CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p6_current_test_var,
+CHECKS = (_p4_hookexec, _p2_fixture_caches, _p3_logging, _warnings, _p5_group_suffix, _p6_current_test_var,
           _p7_basetemp, _p8_logger_dict, _p9_doctest_item, _per_test_global_hooks,
           _p10_worker_identity, _p11_warnings_recorder, _p12_cache, _p13_redirect, _p14_patch_guard, _p15_capture_suspend,
           _x2_worker_interactor,

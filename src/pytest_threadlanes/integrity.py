@@ -83,7 +83,7 @@ class StdioWatch:
             redirect = (f"contextlib.redirect_{name} is per lane already." if self._redirects_per_lane
                         else f"with -s, contextlib.redirect_{name} replaces it for the whole process "
                              f"too: mark those tests lanes_exclusive, or run without -s.")
-            self._ledger._violation(
+            self._ledger.violation(
                 f"sys.{name} was replaced (by {type(getattr(sys, name)).__name__}) while these tests "
                 f"ran on concurrent lanes: {', '.join(running[:8])}"
                 f"{' ...' if len(running) > 8 else ''}. The other lanes' {name} went to the "
@@ -107,7 +107,7 @@ class Ledger:
         self._finished: dict = {}     # lane id -> the last nodeid it logfinished
         self.done: Counter = Counter()
 
-    def _violation(self, message: str) -> None:
+    def violation(self, message: str) -> None:
         with self._lock:
             self.violations.append(message)
 
@@ -119,7 +119,7 @@ class Ledger:
         item = lane.current_item
         if item is None or item.nodeid != nodeid:
             running = item.nodeid if item is not None else "no test"
-            self._violation(f"lane {lane.gateway.id} emitted {name} for {nodeid} "
+            self.violation(f"lane {lane.gateway.id} emitted {name} for {nodeid} "
                             f"while running {running}")
 
     # On the main thread, as a routed hook is replayed.
@@ -130,15 +130,15 @@ class Ledger:
         current = self._open.get(lane_id)
         if name == "pytest_runtest_logstart":
             if current is not None:
-                self._violation(f"lane {lane_id}: logstart for {nodeid} before logfinish for {current}")
+                self.violation(f"lane {lane_id}: logstart for {nodeid} before logfinish for {current}")
             self._open[lane_id] = nodeid
         elif name == "pytest_runtest_logreport":
             if current != nodeid:
-                self._violation(f"lane {lane_id}: report for {nodeid} outside its logstart/logfinish "
+                self.violation(f"lane {lane_id}: report for {nodeid} outside its logstart/logfinish "
                                 f"(open: {current or 'none'})")
         else:
             if current != nodeid:
-                self._violation(f"lane {lane_id}: logfinish for {nodeid} without its logstart "
+                self.violation(f"lane {lane_id}: logfinish for {nodeid} without its logstart "
                                 f"(open: {current or 'none'})")
             self._open[lane_id] = None
             self._finished[lane_id] = nodeid
@@ -147,10 +147,10 @@ class Ledger:
     def item_done(self, lane_id: str, nodeid: str) -> None:
         current = self._open.get(lane_id)
         if current is not None:
-            self._violation(f"lane {lane_id}: {nodeid} done while {current} has no logfinish")
+            self.violation(f"lane {lane_id}: {nodeid} done while {current} has no logfinish")
             self._open[lane_id] = None
         if self._finished.pop(lane_id, None) != nodeid:
-            self._violation(f"lane {lane_id}: {nodeid} finished without its logstart/logfinish")
+            self.violation(f"lane {lane_id}: {nodeid} finished without its logstart/logfinish")
         self.done[nodeid] += 1
 
     def check_complete(self, items) -> None:
@@ -160,7 +160,7 @@ class Ledger:
             return
         for nodeid in sorted(set(expected) | set(self.done)):
             if expected[nodeid] != self.done[nodeid]:
-                self._violation(f"{nodeid}: collected {expected[nodeid]} time(s), "
+                self.violation(f"{nodeid}: collected {expected[nodeid]} time(s), "
                                 f"ran {self.done[nodeid]} time(s)")
 
     def raise_if_violated(self) -> None:

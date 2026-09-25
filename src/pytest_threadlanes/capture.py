@@ -207,6 +207,20 @@ class _LaneBinaryStream:
     def flush(self):
         self._text.flush()
 
+    def writelines(self, lines):
+        for b in lines:
+            self.write(b)
+
+    # As the text stream: on a lane these name the lane's capture, not the terminal.
+    def fileno(self):
+        return self._text.fileno()
+
+    def isatty(self):
+        return self._text.isatty()
+
+    def writable(self):
+        return True
+
     def __getattr__(self, name):
         return getattr(self._text._real.buffer, name)
 
@@ -372,6 +386,11 @@ class _LogDispatch(logging.Handler):
         self.__dict__["_key"] = key
         self.__dict__["_fallback"] = fallback
         super().__init__()
+        self.__dict__["_ready"] = True     # from here, formatter writes go to the lane's handler
+
+    def _set_formatter(self, fmt):
+        if self.__dict__.get("_ready"):    # logging.Handler.__init__ sets it to None first
+            self._t().setFormatter(fmt)
 
     def _t(self):
         lane = LANE.get()
@@ -380,7 +399,14 @@ class _LogDispatch(logging.Handler):
     level = property(lambda s: s._t().level, lambda s, v: None)
     records = property(lambda s: s._t().records)
     stream = property(lambda s: s._t().stream)
-    formatter = property(lambda s: s._t().formatter, lambda s, v: None)
+    formatter = property(lambda s: s._t().formatter, lambda s, v: s._set_formatter(v))
+
+    # caplog.handler.addFilter(...) applies to the lane's handler, which filters its records.
+    def addFilter(self, f):
+        self._t().addFilter(f)
+
+    def removeFilter(self, f):
+        self._t().removeFilter(f)
 
     def setLevel(self, level):
         self._t().setLevel(level)
@@ -392,8 +418,9 @@ class _LogDispatch(logging.Handler):
         self._t().clear()
 
     def handle(self, record):
-        if LANE.get() is None:
-            return self.__dict__["_fallback"].handle(record)
+        # Records of threads that are not lanes (a heartbeat started at session start, the
+        # main thread) belong to no test. The plugin's own handlers would keep them for the
+        # whole session (nothing resets them under lanes): they are dropped.
         return False
 
     def emit(self, record):  # pragma: no cover - handle() short-circuits
@@ -407,6 +434,11 @@ class _LogRouter(logging.Handler):
         lane = LANE.get()
         if lane is None:
             return False
+        # Attached to the root and to non-propagating loggers: a logger made to propagate
+        # again (for caplog) would deliver the same record twice.
+        if record.__dict__.get("_lanes_routed"):
+            return True
+        record._lanes_routed = True
         for h in lane.log_handlers.values():
             if record.levelno >= h.level:
                 h.handle(record)

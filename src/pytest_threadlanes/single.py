@@ -25,7 +25,6 @@ def _timeout_marked(item) -> bool:
 
 
 class SingleProcessSession(LaneRunner):
-    set_report_node = True
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -81,9 +80,15 @@ class SingleProcessSession(LaneRunner):
             sched.add_node(n)
         for n in nodes:                      # DSession.worker_collectionfinish
             sched.add_node_collection(n, ids)
-        threads = [self.start(n, items) for n in nodes]
-        if sched.collection_is_completed:
-            sched.schedule()
+        threads: list = []
+        try:
+            for n in nodes:
+                threads.append(self.start(n, items))
+            if sched.collection_is_completed:
+                sched.schedule()
+        except KeyboardInterrupt:           # before the pump: lanes may already run tests
+            self._interrupt(threads, nodes[:len(threads)])
+            raise
         self._pump(threads, sched, session, nodes)
 
     def _run_serial(self, session, items) -> None:

@@ -165,6 +165,7 @@ PER_LANE_ENVIRON = {
     CURRENT_TEST_VAR: lambda lane: None,
     "PYTEST_XDIST_WORKER": lambda lane: lane.workerinput["workerid"],
     "PYTEST_XDIST_WORKER_COUNT": lambda lane: str(lane.workerinput["workercount"]),
+    "PYTEST_XDIST_TESTRUNUID": lambda lane: lane.workerinput["testrunuid"],
 }
 
 
@@ -590,12 +591,18 @@ def _importing(frame) -> bool:
 
 
 
+#: Modules whose frames stand between a write to os.environ and the code that made it.
+_ENVIRON_MODULES = frozenset({"os", "_collections_abc", __name__})
+
 #: Audit events of direct process-wide writes that the patch guard checks (public API).
 AUDITED = frozenset({"os.putenv", "os.unsetenv", "os.chdir"})
 
 
 def _shared_mapping(mapping) -> bool:
-    return mapping is os.environ or mapping is sys.modules or isinstance(mapping, str)
+    """``os.environ``, ``sys.modules``, a dotted path, or a dict a module holds (a config
+    registry): every lane sees a patch of it."""
+    return (mapping is os.environ or mapping is sys.modules or isinstance(mapping, str)
+            or _held_by_a_module(mapping))
 
 
 @contextlib.contextmanager
@@ -666,7 +673,8 @@ def guard_process_patches(config, is_exclusive):
         def _patch_dict(self):
             if _shared_mapping(self.in_dict):
                 name = self.in_dict if isinstance(self.in_dict, str) else \
-                    ("os.environ" if self.in_dict is os.environ else "sys.modules")
+                    ("os.environ" if self.in_dict is os.environ else
+                     "sys.modules" if self.in_dict is sys.modules else "a module-level dict")
                 check(f"mock.patch.dict of {name}", sys._getframe(1))
             return original(self)
         return _patch_dict
@@ -686,9 +694,10 @@ def guard_process_patches(config, is_exclusive):
     def mp_item(verb):
         def make(original):
             def method(self, dic, name, *args, **kwargs):
-                if dic is os.environ or dic is sys.modules:
-                    check(f"monkeypatch.{verb} of {'os.environ' if dic is os.environ else 'sys.modules'}",
-                          sys._getframe(1))
+                if _shared_mapping(dic):
+                    name = ("os.environ" if dic is os.environ else "sys.modules" if dic is sys.modules
+                            else "a module-level dict")
+                    check(f"monkeypatch.{verb} of {name}", sys._getframe(1))
                 return original(self, dic, name, *args, **kwargs)
             return method
         return make
@@ -719,8 +728,8 @@ def guard_process_patches(config, is_exclusive):
         if not active[0] or event not in AUDITED or LANE.get() is None:
             return
         frame = sys._getframe(1)
-        while frame is not None and frame.f_globals.get("__name__") == "os":
-            frame = frame.f_back                        # os.environ's own methods
+        while frame is not None and frame.f_globals.get("__name__") in _ENVIRON_MODULES:
+            frame = frame.f_back       # os.environ's own methods (and MutableMapping's, P6's)
         if _importing(frame):
             return
         if event == "os.chdir":

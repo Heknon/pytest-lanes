@@ -684,3 +684,83 @@ def test_no_dead_symlinks_left_in_lane_basetemps(pytester, mode):
     run(pytester, *mode, f"--basetemp={bt}", timeout=60)
     dead = [p for p in bt.rglob("*") if p.is_symlink() and not p.exists()]
     assert dead == [], dead
+
+
+# ---------------------------------------------------------------- hybrid: workers going down
+def test_hybrid_worker_crash_while_the_controller_is_busy(pytester):
+    # A sibling lane's completion, still queued when the worker died, made the scheduler
+    # send work to the dead worker: "cannot send (already closed?)", INTERNALERROR.
+    # The lane proxies now follow xdist's own view of the worker (shutting_down).
+    pytester.makeconftest("""
+        import os, time
+        def pytest_runtest_logreport(report):     # a busy controller
+            if "PYTEST_XDIST_WORKER" not in os.environ and report.nodeid.endswith("test_a") \\
+                    and report.when == "call":
+                time.sleep(1.5)
+    """)
+    pytester.makepyfile("""
+        import os, time, pytest
+        def test_a():
+            pass
+        def test_b():
+            time.sleep(0.3)
+            os._exit(1)
+        @pytest.mark.parametrize("i", range(40))
+        def test_fill(i):
+            time.sleep(0.05)
+    """)
+    for dist in ("load", "loadscope"):
+        r = run(pytester, "-n", "1", "--lanes", "2", "--dist", dist, timeout=120)
+        out = r.stdout.str()
+        assert r.ret == pytest.ExitCode.TESTS_FAILED and "INTERNALERROR" not in out, (dist, out[-2000:])
+        r.stdout.fnmatch_lines(["*crashed*test_b*"])
+
+
+def test_hybrid_maxfail_counted_by_the_controller(pytester):
+    # Neither worker reached --maxfail, the controller did: the scheduler kept sending
+    # work to workers told to shut down, and a test that never ran was "crashed".
+    pytester.makepyfile("""
+        import threading, time, pytest
+        _lock = threading.Lock()
+        _failed = []
+        @pytest.mark.parametrize("i", range(300))
+        def test_t(i):
+            time.sleep(0.02)
+            if i >= 20:
+                with _lock:
+                    first = not _failed
+                    _failed.append(i)
+                assert not first, "one failure per process"
+    """)
+    r = run(pytester, "-n", "2", "--lanes", "2", "--dist", "load", "--maxfail=2", timeout=120)
+    out = r.stdout.str()
+    assert r.ret == pytest.ExitCode.INTERRUPTED and "INTERNALERROR" not in out, out[-2000:]
+    assert "crashed" not in out, out[-2000:]
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "1", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_exclusive_fixture_of_a_wider_scope(pytester, mode):
+    # The run-time check looked at the fixture's request node (the module), not the test:
+    # a module-scoped exclusive fixture always failed its (exclusive) test.
+    pytester.makeini("[pytest]\nlanes_exclusive_fixtures = capsys capfd recwarn global_patch\n")
+    pytester.makepyfile("""
+        import pytest
+        @pytest.fixture(scope="module")
+        def global_patch():
+            yield "patched"
+        def test_uses(global_patch):
+            assert global_patch == "patched"
+        def test_other():
+            pass
+    """)
+    run(pytester, *mode, timeout=60).assert_outcomes(passed=2)
+
+
+
+def test_invalid_interrupt_grace_is_refused_at_startup(pytester):
+    # It was read only at Ctrl-C, which then failed with ValueError and ran no teardown.
+    pytester.makeini("[pytest]\nlanes_interrupt_grace = 30s\n")
+    pytester.makepyfile("def test_t(): pass")
+    r = run(pytester, "--lanes", "2", timeout=60)
+    assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str() + r.stderr.str()
+    assert "lanes_interrupt_grace" in r.stderr.str()

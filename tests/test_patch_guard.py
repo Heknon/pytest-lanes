@@ -475,3 +475,32 @@ def test_import_time_environment_default_is_allowed(pytester):
             import knobs
     """)
     run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=4)
+
+
+@pytest.mark.parametrize("form", ["patch_dict", "setitem"])
+def test_patch_of_a_module_held_dict_is_guarded(pytester, form):
+    # By dotted path it was guarded; by the object itself, or through setitem, not.
+    body = {"patch_dict": "with mock.patch.dict(cfg.CONFIG, {'endpoint': 'stub'}): pass",
+            "setitem": "monkeypatch.setitem(cfg.CONFIG, 'endpoint', 'stub')"}[form]
+    pytester.makepyfile(cfg="CONFIG = {'endpoint': 'prod'}\n", test_d=f"""
+        from unittest import mock
+        import cfg
+        def test_it(monkeypatch):
+            {body}
+    """)
+    r = run(pytester, "--lanes", "2", timeout=60)
+    r.assert_outcomes(failed=1)
+    r.stdout.fnmatch_lines([GUARD_MESSAGE])
+
+
+def test_environment_write_by_an_exempt_plugin(pytester):
+    # The frame walk stopped at lanes' own os.environ class, so pytest-cov's writes
+    # (COV_CORE_CONTEXT, pytest-cov < 7) were judged as the test's own.
+    pytester.makepyfile(test_ex="""
+        import os
+        CODE = compile("import os\\nos.environ['COV_CORE_CONTEXT'] = 'x'\\n"
+                       "os.environ.setdefault('COV_OTHER', 'y')\\n", "fake_cov.py", "exec")
+        def test_env_write_from_exempt_module():
+            exec(CODE, {"__name__": "pytest_cov.engine"})
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)

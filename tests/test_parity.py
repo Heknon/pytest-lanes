@@ -3,6 +3,7 @@
 Every test here runs one suite under plain xdist, single-process lanes and hybrid,
 and compares report-log rows (nodeid, when, outcome, section names) or junitxml.
 """
+import json
 import re
 
 import pytest
@@ -245,3 +246,34 @@ def test_rerun_suite_counter_is_serialized_across_lanes(pytester):
     r = run(pytester, "-n", "2", "--lanes", "8", "--reruns", "1", "--max-suite-reruns", "1000", timeout=180)
     outcomes = r.parseoutcomes()
     assert (outcomes.get("passed"), outcomes.get("rerun")) == (200, 200), r.stdout.str()[-2000:]
+
+
+def test_collection_error_output_is_captured(pytester):
+    # Lanes turn pytest's capture off, so a module printing before its import failed
+    # wrote to the terminal (or, in a hybrid worker, nowhere) instead of the report.
+    pytester.makepyfile(test_col="print('PRINTED-AT-IMPORT')\nraise RuntimeError('boom at import')\n",
+                        test_ok="def test_ok(): pass\n")
+    sections = {}
+    for name, mode in MODES.items():
+        _, _ = report_log(pytester, *mode, timeout=60)
+        for e in map(json.loads, open(pytester.path / "rl.jsonl")):
+            if e.get("$report_type") == "CollectReport" and e["outcome"] == "failed":
+                sections[name] = [(t, "PRINTED-AT-IMPORT" in text) for t, text in e["sections"]]
+    assert sections["lanes"] == sections["xdist"] and ("Captured stdout", True) in sections["xdist"], sections
+    assert sections["hybrid"] == sections["xdist"], sections
+
+
+def test_group_suffix_with_two_group_marks(pytester):
+    # The suffix followed xdist 3.8's rule (every mark, sorted) whatever xdist was installed;
+    # xdist 3.6 uses the closest mark only.
+    pytester.makepyfile(test_g="""
+        import pytest
+        @pytest.mark.xdist_group("outer")
+        class TestC:
+            @pytest.mark.xdist_group("inner")
+            def test_two_groups(self):
+                pass
+    """)
+    _, xdist_rows = report_log(pytester, "-n", "2", "--dist", "loadgroup", timeout=60)
+    _, lanes_rows = report_log(pytester, "--lanes", "2", "--lanes-dist", "loadgroup", timeout=60)
+    assert lanes_rows == xdist_rows

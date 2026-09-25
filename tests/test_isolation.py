@@ -721,3 +721,113 @@ def test_xdist_worker_environment_variables_name_the_lane(pytester, mode, count)
                 time.sleep(0.005)
     """ % count)
     run(pytester, *mode, timeout=60).assert_outcomes(passed=8)
+
+
+# ---------------------------------------------------------------- logging edge cases
+LANE_ONLY = {"lanes": MODES["lanes"], "hybrid": MODES["hybrid"]}
+
+
+@pytest.mark.parametrize("name", LANE_ONLY)
+def test_logger_made_to_propagate_is_captured_once(pytester, name):
+    # A library logger set non-propagating, then made to propagate for caplog: records
+    # reached the lane twice (through its own handler and through the root's).
+    pytester.makepyfile(test_dup="""
+        import logging, pytest
+        lg = logging.getLogger("lib")
+        lg.propagate = False
+        @pytest.fixture
+        def lib_caplog(caplog):
+            lg.propagate = True
+            yield caplog
+            lg.propagate = False
+        def test_a(lib_caplog):
+            lg.warning("one")
+            assert [r.getMessage() for r in lib_caplog.records] == ["one"]
+        def test_b(lib_caplog):
+            lg.warning("two")
+            assert [r.getMessage() for r in lib_caplog.records] == ["two"]
+    """)
+    run(pytester, *LANE_ONLY[name], timeout=60).assert_outcomes(passed=2)
+
+
+@pytest.mark.parametrize("name", LANE_ONLY)
+def test_caplog_handler_formatter_and_filters(pytester, name):
+    pytester.makepyfile(test_fmt="""
+        import logging
+        def test_fmt(caplog):
+            caplog.handler.setFormatter(logging.Formatter("CUSTOM %(message)s"))
+            logging.getLogger("x").warning("hello")
+            assert "CUSTOM hello" in caplog.text, repr(caplog.text)
+        def test_filter(caplog):
+            caplog.handler.addFilter(lambda r: "keep" in r.getMessage())
+            logging.getLogger("x").warning("keep me")
+            logging.getLogger("x").warning("drop me")
+            assert [r.getMessage() for r in caplog.records] == ["keep me"]
+    """)
+    run(pytester, *LANE_ONLY[name], timeout=60).assert_outcomes(passed=2)
+
+
+def test_logs_from_threads_outside_lanes_are_not_kept(pytester):
+    # A background thread started at session start (not a lane) logged into the logging
+    # plugin's own handlers, which nothing resets under lanes: they grew for the session.
+    pytester.makeconftest("""
+        import logging, threading, time
+        stop = threading.Event()
+        def _heartbeat():
+            lg = logging.getLogger("infra.heartbeat")
+            while not stop.is_set():
+                lg.warning("heartbeat")
+                time.sleep(0.001)
+        def pytest_sessionstart(session):
+            threading.Thread(target=_heartbeat, daemon=True).start()
+        def pytest_sessionfinish(session):
+            stop.set()
+            lp = session.config.pluginmanager.get_plugin("logging-plugin")
+            for name in ("caplog_handler", "report_handler"):
+                h = getattr(lp, name)
+                h = h.__dict__.get("_fallback", h)
+                print(f"\\nKEPT {name} {len(h.records)}")
+    """)
+    pytester.makepyfile("""
+        import time, pytest
+        @pytest.mark.parametrize("i", range(2))
+        def test_slow(i):
+            time.sleep(0.5)
+    """)
+    r = run(pytester, "--lanes", "2", "-s", timeout=60)
+    kept = [int(line.split()[-1]) for line in r.outlines if line.startswith("KEPT ")]
+    assert kept and max(kept) < 50, kept
+
+
+# ---------------------------------------------------------------- sys.stdout.buffer
+def test_writes_through_the_binary_buffer_stay_in_the_lane(pytester):
+    pytester.makepyfile(test_buf="""
+        import os, sys
+        def test_writelines():
+            sys.stdout.buffer.writelines([b"VIA-WRITELINES\\n"])
+            assert not sys.stdout.buffer.isatty()
+            assert False
+        def test_buffer_fileno():
+            assert sys.stdout.buffer.fileno() == sys.stdout.fileno()
+            os.write(sys.stdout.buffer.fileno(), b"VIA-FILENO\\n")
+            assert False
+    """)
+    r = run(pytester, "--lanes", "2", "-rA", timeout=60)
+    r.assert_outcomes(failed=2)
+    out = r.stdout.str()
+    # Each line appears only inside its test's captured section, never loose on the terminal.
+    for token in ("VIA-WRITELINES", "VIA-FILENO"):
+        lines = [i for i, line in enumerate(r.outlines) if line == token]
+        assert lines, (token, out)
+        section = max(i for i, line in enumerate(r.outlines[:lines[0]]) if "Captured stdout call" in line)
+        assert section < lines[0], (token, out)
+
+
+def test_single_process_lanes_have_the_worker_environment(pytester):
+    pytester.makepyfile(test_w="""
+        import os
+        def test_it(request, testrun_uid):
+            assert os.environ["PYTEST_XDIST_TESTRUNUID"] == testrun_uid
+            assert "mainargv" in request.config.workerinput
+    """)
+    run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)

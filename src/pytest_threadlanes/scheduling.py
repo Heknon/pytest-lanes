@@ -71,13 +71,19 @@ def make_scheduler(config, numnodes: int):
     return sched
 
 
+class _Loadgroup:
+    """The one config value xdist's worker hook reads: ``--dist loadgroup`` is on."""
+
+    @staticmethod
+    def getvalue(name):
+        return name == "loadgroup"
+
+
 def add_group_suffix(items) -> None:
-    """P5: append ``@group`` to xdist_group-marked nodeids, exactly as xdist's
-    worker does under loadgroup, so nodeids (and everything keyed on them) match
-    an ``-n --dist loadgroup`` run."""
-    for item in items:
-        groups = set()
-        for mark in item.iter_markers("xdist_group"):
-            groups.add(str(mark.args[0] if mark.args else mark.kwargs.get("name", "default")))
-        if groups:
-            item._nodeid = f"{item.nodeid}@{'_'.join(sorted(groups))}"
+    """P5: append ``@group`` to xdist_group-marked nodeids with xdist's own worker code
+    (``WorkerInteractor.pytest_collection_modifyitems``, which does not use ``self``), so
+    nodeids match an ``-n --dist loadgroup`` run of the installed xdist: 3.6 takes the
+    closest mark, 3.8 every mark."""
+    from xdist.remote import WorkerInteractor
+
+    WorkerInteractor.pytest_collection_modifyitems(None, _Loadgroup(), items)

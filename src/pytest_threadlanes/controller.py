@@ -42,7 +42,19 @@ class LaneProxy:
         self.gateway = SimpleNamespace(id=f"{wc.gateway.id}.ln{lane}", spec=wc.gateway.spec)
         self.workerinput = {**wc.workerinput, "workerid": self.gateway.id,
                             "workercount": mux.total_lanes}
-        self.shutting_down = False
+        self._shutting_down = False
+
+    @property
+    def shutting_down(self) -> bool:
+        """Also when xdist knows the worker is down or told to shut down (its own
+        ``shutting_down``): a completion still queued from a sibling lane must not make
+        the scheduler send work to a dead worker (INTERNALERROR), or to one draining
+        after ``--maxfail``."""
+        return self._shutting_down or bool(getattr(self.wc, "shutting_down", False))
+
+    @shutting_down.setter
+    def shutting_down(self, value: bool) -> None:
+        self._shutting_down = value
 
     @property
     def workerinfo(self):  # set on the WorkerController by DSession before add_node
@@ -65,10 +77,11 @@ class LaneProxy:
         raise NotImplementedError("--dist worksteal is not supported by lanes")
 
     def shutdown(self) -> None:
-        if not self.shutting_down:
-            self.shutting_down = True
-            with contextlib.suppress(OSError):
-                self.wc.sendcommand("lanes_shutdown", lane=self.lane)
+        if not self._shutting_down:
+            self._shutting_down = True
+            if not self.wc.shutting_down:
+                with contextlib.suppress(OSError):
+                    self.wc.sendcommand("lanes_shutdown", lane=self.lane)
 
     def __repr__(self) -> str:
         return f"<LaneProxy {self.gateway.id}>"
