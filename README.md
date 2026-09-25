@@ -92,7 +92,7 @@ Lanes are threads, so anything process-global is shared between concurrently run
 - Replacing `sys.stdout` directly, as click's `CliRunner` does, cannot be made per lane: the run fails and names the tests. Mark them `lanes_exclusive`.
 - A test reading stdin fails at once, as under pytest's capture.
 - `PYTEST_CURRENT_TEST` is per lane: `os.environ["PYTEST_CURRENT_TEST"]` names the test running on that lane. It is not written to the process environment (that broke other lanes' subprocess spawns), so a subprocess sees it only if you pass `env=os.environ.copy()`.
-- Ctrl-C interrupts the running tests and runs their teardown (see `lanes_interrupt_grace`).
+- Ctrl-C interrupts the running tests and runs their teardown (see `lanes_interrupt_grace`). It lands in the tests' own code: a lane that is inside the standard library, pytest or xdist finishes its current test first.
 
 Other limits:
 - A hung thread cannot be killed. pytest-timeout is refused in single-process mode (on a timeout it would end the whole process) but works in hybrid mode, where xdist replaces the worker. `faulthandler_timeout` is refused in both modes.

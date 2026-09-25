@@ -23,6 +23,8 @@ First release.
 - Patch guard: a process-wide patch (mock, monkeypatch, direct environment writes,
   `os.chdir`) in a test that is not `lanes_exclusive` fails with instructions;
   `--lanes-allow-patches` opts out.
+- Ctrl-C interrupts the running tests and runs their teardown, as pytest does. The
+  interrupt lands only in the tests' own code, never inside a library lock.
 - `--lanes-detect`: a sequential run that reports which tests and fixtures change
   process-wide state.
 - Requires Python 3.12 or later. Compatible with pytest 8.0–9.x and pytest-xdist 3.6–3.x;

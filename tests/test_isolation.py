@@ -726,21 +726,26 @@ LANE_ONLY = {"lanes": MODES["lanes"], "hybrid": MODES["hybrid"]}
 def test_logger_made_to_propagate_is_captured_once(pytester, name):
     # A library logger set non-propagating, then made to propagate for caplog: records
     # reached the lane twice (through its own handler and through the root's).
+    # A logger per test: `propagate` is process-wide, and the two tests run at once.
     pytester.makepyfile(test_dup="""
         import logging, pytest
-        lg = logging.getLogger("lib")
-        lg.propagate = False
-        @pytest.fixture
-        def lib_caplog(caplog):
-            lg.propagate = True
-            yield caplog
+        LIBS = {name: logging.getLogger("lib_" + name) for name in ("test_a", "test_b")}
+        for lg in LIBS.values():
             lg.propagate = False
-        def test_a(lib_caplog):
+        @pytest.fixture
+        def lib(request, caplog):
+            lg = LIBS[request.node.name]
+            lg.propagate = True
+            yield lg, caplog
+            lg.propagate = False
+        def test_a(lib):
+            lg, caplog = lib
             lg.warning("one")
-            assert [r.getMessage() for r in lib_caplog.records] == ["one"]
-        def test_b(lib_caplog):
+            assert [r.getMessage() for r in caplog.records] == ["one"]
+        def test_b(lib):
+            lg, caplog = lib
             lg.warning("two")
-            assert [r.getMessage() for r in lib_caplog.records] == ["two"]
+            assert [r.getMessage() for r in caplog.records] == ["two"]
     """)
     run(pytester, *LANE_ONLY[name], timeout=60).assert_outcomes(passed=2)
 

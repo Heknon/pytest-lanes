@@ -55,7 +55,7 @@ class ThreadNode:
 
         # Scheduler-facing: item indices to run, then SHUTDOWN.
         self.shutting_down = False
-        self.queue: queue.Queue = queue.Queue()
+        self.queue = queue.SimpleQueue()
 
         # Execution-facing: what a worker process would own.
         self.setupstate = setupstate
@@ -82,6 +82,7 @@ class ThreadNode:
         self.log_handlers = log_handlers
         self.tmp_path_factory = None  # this lane's basetemp, created on first use (isolation.py)
         self.current_item = None      # the item this lane is running, if any
+        self.tearing_down = False     # after an exception: not interrupted again (runner.py)
 
     def send_runtest_some(self, indices) -> None:
         for i in indices:

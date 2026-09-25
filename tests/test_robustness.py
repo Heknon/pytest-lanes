@@ -52,6 +52,38 @@ def test_keyboard_interrupt_in_a_test_ends_run_interrupted(pytester, mode):
     assert r.ret == pytest.ExitCode.INTERRUPTED
 
 
+@pytest.mark.parametrize("mode", [["--lanes", "32"], ["-n", "2", "--lanes", "16"]], ids=["lanes", "hybrid"])
+def test_interrupt_never_leaves_a_lock_held(pytester, mode):
+    # Ctrl-C raised KeyboardInterrupt in every lane after whatever C call it was in,
+    # also a lock's acquire, before the `with`/`try` that releases it. The lock stayed
+    # held (logging's, taken at each phase; the event queue's) and the other lanes or
+    # the main thread waited forever: 17 of 20 runs hung on 3.14t, 30 of 30 on 3.12.
+    import time
+    pytester.makeini("[pytest]\nlanes_interrupt_grace = 30\n")
+    pytester.makeconftest("""
+        import sys
+        def pytest_configure(config):
+            sys.setswitchinterval(1e-6)
+    """)
+    pytester.makepyfile("""
+        import logging, pytest
+        def log(i):          # the test's own code: where a lane is interrupted
+            logging.getLogger("t").warning("step %d", i)
+        @pytest.mark.parametrize("i", range(400))
+        def test_s(i):
+            for _ in range(20):
+                log(i)
+            if i == 150:
+                raise KeyboardInterrupt
+    """)
+    for _ in range(3):
+        started = time.monotonic()
+        r = run(pytester, *mode, timeout=60)
+        took = time.monotonic() - started
+        assert r.ret == pytest.ExitCode.INTERRUPTED
+        assert took < 20 and "did not stop" not in r.stdout.str(), (took, r.stdout.str()[-2000:])
+
+
 @pytest.mark.parametrize("mode", MODES.values(), ids=MODES.keys())
 def test_pytest_exit_in_a_test_ends_run(pytester, mode):
     pytester.makepyfile(ENV_TESTS.replace("{body}", 'if env == "envB": pytest.exit("bye", returncode=7)'))

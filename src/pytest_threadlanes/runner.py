@@ -53,13 +53,13 @@ def is_doctest(item) -> bool:
 
 
 class ItemDone(NamedTuple):
-    """Queued by a lane after each item; the lane waits on ``ack`` before continuing."""
+    """Queued by a lane after each item; the lane waits on ``ack`` (a put) before continuing."""
 
     node: ThreadNode
     index: int
     nodeid: str
     duration: float
-    ack: threading.Event
+    ack: queue.SimpleQueue
 
 
 class LaneRunner:
@@ -70,7 +70,7 @@ class LaneRunner:
         self.config = config
         self.n = config.getoption("lanes")
         self.uid = uuid.uuid4().hex
-        self.events: queue.Queue = queue.Queue()   # HookCall | ItemDone, consumed by _pump
+        self.events = queue.SimpleQueue()          # HookCall | ItemDone, consumed by _pump
         self.stop = threading.Event()              # -x / --maxfail reached
         self.errors: list = []                     # exceptions escaping a lane thread
         self.teardown_errors: list = []            # (lane id, error) from teardown after a stop
@@ -234,9 +234,9 @@ class LaneRunner:
                     # Still holding the lock: an exclusive test (hybrid mode runs them
                     # between others) must not start while these reports are replayed,
                     # or its capfd captures what the replay writes.
-                    ack = threading.Event()
+                    ack = queue.SimpleQueue()
                     self.events.put(ItemDone(node, index, item.nodeid, time.perf_counter() - start, ack))
-                    ack.wait()
+                    ack.get()
                 if self.stopping(session):      # as xdist's worker loop, after each item
                     break
             with self.exclusive_lock.shared():  # not beside an exclusive test (capfd)
@@ -244,6 +244,7 @@ class LaneRunner:
         except BaseException:
             # Ctrl-C, pytest.exit(), or an error out of the protocol: as pytest's own
             # sessionfinish would, tear down what this lane holds before leaving.
+            node.tearing_down = True
             node.current_item = None
             self._final_teardown(node)
             raise
@@ -344,7 +345,7 @@ class LaneRunner:
         try:
             self._item_done(event, st.held, st.sched, st.session, st.nodes, st.on_done, st.before_replay)
         finally:                                  # even on Ctrl-C: the lane waits for this
-            event.ack.set()
+            event.ack.put(None)
 
     def _check_lane_errors(self, nodes) -> None:
         """A lane died: stop the others now, as xdist's controller does on a worker error.
@@ -388,14 +389,18 @@ class LaneRunner:
         for n in nodes:
             n.shutdown()
         running = {t: n for t, n in zip(threads, nodes) if t.is_alive()}
-        for t in running:
-            raise_in_thread(t, KeyboardInterrupt)
+        with LaneInterrupter(running) as interrupter:
+            self._await_lanes(running, reason, interrupter.poll)
+
+    def _await_lanes(self, running, reason: str, poll) -> None:
+        """Replay what the lanes still report until they have exited or the grace ends."""
         grace = self.grace
         deadline = time.monotonic() + grace
         self._say(f"{reason}: stopping {len(running)} lane(s) and running their teardown "
                   f"(up to {grace:g}s; press Ctrl-C again to stop waiting)")
         try:
             while any(t.is_alive() for t in running) and time.monotonic() < deadline:
+                poll()
                 try:
                     event = self.events.get(timeout=0.05)
                 except queue.Empty:
@@ -431,19 +436,106 @@ class _PumpState:
         self.held: dict = {}                    # lane id -> hook calls held (exclusive test)
 
 
-def raise_in_thread(thread: threading.Thread, exc_type) -> bool:
-    """Raise ``exc_type`` in ``thread`` when it next runs Python code (CPython C API).
+class LaneInterrupter:
+    """Raises KeyboardInterrupt in each running lane, where it cannot strand a lock.
 
-    Best effort: a thread blocked in one long C call (a sleep, a socket read without
-    a timeout) only sees it once that call returns.
+    ``PyThreadState_SetAsyncExc`` raises it after whatever C call the thread is in,
+    including a lock's acquire, before the ``with``/``try`` that would release it:
+    the lock stayed held (logging's, a queue's) and every other lane, or the main
+    thread, waited on it forever. Raising it as any function starts is no better:
+    releases go through Python functions too (``Condition.__exit__``, logging's
+    ``_releaseLock()`` in a ``finally``).
+
+    So it is raised from a ``sys.monitoring`` PY_START callback, only as the lane's
+    own code calls its own code: neither function is library code (the standard
+    library, pytest, pluggy, xdist, execnet or this plugin), so no library lock is
+    between its acquire and its release. A lane in no such call (blocked in a C
+    call such as a sleep, or looping over them) gets ``PyThreadState_SetAsyncExc``
+    once two successive polls, after ``FALLBACK_AFTER``, find it at the same
+    instruction of a frame of its own code: it fires as that call returns there.
+    A lane only in library code is not interrupted: it stops after its current test,
+    or is abandoned after the grace period. A lane tearing down after an exception
+    is left alone.
     """
+
+    FALLBACK_AFTER = 0.5
+    #: sys.monitoring tool ids free by convention (0-2 and 5 are named for debuggers,
+    #: coverage, profilers and optimizers).
+    TOOL_IDS = (3, 4)
+
+    def __init__(self, running: dict) -> None:
+        self.pending = {t.ident: n for t, n in running.items() if t.ident is not None}
+        self.tool = None
+        self.started = time.monotonic()
+        self._seen: dict = {}                  # ident -> (frame, f_lasti) at the last poll
+
+    def _claim(self, ident) -> bool:
+        """Exactly one of the lane's callback and the main thread's fallback raises."""
+        node = self.pending.pop(ident, None)     # atomic
+        return node is not None and not node.tearing_down
+
+    def __enter__(self) -> LaneInterrupter:
+        mon = sys.monitoring
+        self.tool = next((i for i in self.TOOL_IDS if mon.get_tool(i) is None), None)
+        if self.tool is None:                    # both ids taken by other tools
+            return self
+
+        def on_start(code, offset):
+            ident = threading.get_ident()
+            if ident not in self.pending:
+                return
+            callee = sys._getframe(1)
+            caller = callee.f_back
+            if caller is not None and not _library(callee) and not _library(caller) \
+                    and self._claim(ident):
+                raise KeyboardInterrupt
+
+        mon.use_tool_id(self.tool, "pytest-threadlanes")
+        mon.register_callback(self.tool, mon.events.PY_START, on_start)
+        mon.set_events(self.tool, mon.events.PY_START)
+        return self
+
+    def poll(self) -> None:
+        """On the main thread, while waiting: the fallback for lanes blocked in C."""
+        if not self.pending or time.monotonic() - self.started < self.FALLBACK_AFTER:
+            return
+        frames = sys._current_frames()
+        for ident in list(self.pending):
+            frame = frames.get(ident)
+            if frame is None or _library(frame):
+                self._seen.pop(ident, None)
+                continue
+            at = (frame, frame.f_lasti)
+            if self._seen.get(ident) == at and self._claim(ident):
+                _set_async_exc(ident, KeyboardInterrupt)
+            self._seen[ident] = at
+
+    def __exit__(self, *exc) -> None:
+        self._seen.clear()
+        if self.tool is not None:
+            mon = sys.monitoring
+            mon.set_events(self.tool, 0)
+            mon.register_callback(self.tool, mon.events.PY_START, None)
+            mon.free_tool_id(self.tool)
+
+
+#: Packages whose code a lane is never interrupted in (LaneInterrupter), besides the
+#: standard library: the test-running machinery.
+_MACHINERY = frozenset({"_pytest", "pytest", "pluggy", "xdist", "execnet", __name__.partition(".")[0]})
+_STDLIB = frozenset(sys.stdlib_module_names - {"test"})   # a suite's own test/ package
+
+
+def _library(frame) -> bool:
+    top = frame.f_globals.get("__name__", "").partition(".")[0]
+    return top in _MACHINERY or top in _STDLIB
+
+
+def _set_async_exc(ident: int, exc_type) -> None:
     import ctypes
 
-    if thread.ident is None:
-        return False
     set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
     set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
-    return set_async_exc(thread.ident, exc_type) == 1
+    set_async_exc(ident, exc_type)
 
 
 class ReadWriteLock:
