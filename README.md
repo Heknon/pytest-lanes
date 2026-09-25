@@ -1,6 +1,6 @@
 # pytest-threadlanes
 
-> **Name.** Distribution `pytest-threadlanes`, import package `pytest_threadlanes`. It was developed as `pytest-lanes`; that name on PyPI belongs to an unrelated project (one subprocess per declared lane) with the same import package and plugin entry, so the two cannot be installed together and `pip install pytest-lanes` gets the other one. The command-line options (`--lanes`, `--lanes-dist`, …), markers and ini settings keep the `lanes` names. The repository is still `Heknon/pytest-lanes`.
+> **Name.** Distribution `pytest-threadlanes`, import package `pytest_threadlanes`. It was developed as `pytest-lanes`; that name on PyPI belongs to an unrelated project (one subprocess per declared lane) with the same import package and plugin entry, so the two cannot be installed together and `pip install pytest-lanes` gets the other one. The command-line options (`--lanes`, `--lanes-dist`, …), markers and ini settings keep the `lanes` names. The repository is `Heknon/pytest-threadlanes`.
 
 Run pytest-xdist's own schedulers on **thread lanes**: in one process, or across many xdist processes. Long, I/O-bound tests can then run thousands-wide without paying 150–500 MB of memory per concurrent test.
 

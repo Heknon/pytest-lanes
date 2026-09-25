@@ -40,7 +40,7 @@ Measured end to end with the plugin at `9ecffa5`, a live server (`--callstack-po
 
 ## 4. Facts about pytest-threadlanes the implementation relies on
 
-The code is in `Heknon/pytest-lanes` under `src/pytest_threadlanes/`.
+The code is in `Heknon/pytest-threadlanes` under `src/pytest_threadlanes/`.
 
 - **Lane identity comes through xdist's own API.** On a lane thread, `config.workerinput["workerid"]` is the lane (`ln3` or `gw0.ln3`), as are `worker_id` and `xdist.get_xdist_worker_id()`. That's touchpoint P10 in `isolation.py`, installed at `pytest_sessionstart`.
   - Elsewhere, `workerinput` is what it was: **absent** on the single-process main thread, and the **process's own** (`gw0`) on a hybrid worker's main thread.
@@ -217,7 +217,7 @@ Write the failing test first each time. **Run tests locally: GitHub runners are 
 | `Heknon/pytest-failure-instrumentation` | `9ecffa5` | version 0.13.1 |
 | `Heknon/morphine-sahara-mock-api` | `a87697a` | `ingest/live_view.py`, `src/data/cycles/*` |
 | `Heknon/morphine-sahara-web` | `ab160bb` | paths under `src/` |
-| `Heknon/pytest-lanes` | branch `claude/pytest-contract-backlog-722ycm` | P10 lane identity, `report.lane_id`, `lane-<id>` thread names |
+| `Heknon/pytest-threadlanes` | branch `claude/pytest-contract-backlog-722ycm` | P10 lane identity, `report.lane_id`, `lane-<id>` thread names |
 
 ## Appendix B: the end-to-end scenarios
 

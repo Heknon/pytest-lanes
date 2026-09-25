@@ -4,7 +4,7 @@ Read this file first. Read DESIGN.md next for the full rationale, the evidence b
 
 ## What this is and why
 
-*Name:* distribution `pytest-threadlanes`, package `src/pytest_threadlanes/`, plugin entry `threadlanes`. Renamed from `pytest-lanes` (round 7): an unrelated PyPI project owns that name, its import package and its plugin entry. Options, markers and ini settings keep the `lanes` names; the repository is still `Heknon/pytest-lanes`.
+*Name:* distribution `pytest-threadlanes`, package `src/pytest_threadlanes/`, plugin entry `threadlanes`. Renamed from `pytest-lanes` (round 7): an unrelated PyPI project owns that name, its import package and its plugin entry. Options, markers and ini settings keep the `lanes` names. Repository: `Heknon/pytest-threadlanes`.
 
 We have a pytest suite of long, I/O-bound tests. Each test takes 1–2 hours, and we need to run thousands of them concurrently. pytest-xdist gives one process per concurrent test, at 150–500 MB each, so memory caps our concurrency. The suite's infrastructure is hundreds of thousands of lines of synchronous code, so converting it to async is not an option.
 
