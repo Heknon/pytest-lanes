@@ -3,7 +3,7 @@
 pytest keeps per-run state in places that assume one test runs at a time. Each
 function here re-keys one of them by the current lane (the ``LANE`` contextvar),
 or makes it safe to share. Each one is a numbered touchpoint in CLAUDE.md and
-DESIGN.md, and ``probes.py`` checks it at startup:
+DESIGN.md; ``probes.py`` checks each at startup, except P1 (the contract tests cover it):
 
 * P1 ``session._setupstate``: one SetupState per lane.
 * P2 ``FixtureDef.cached_result`` / ``_finalizers`` / ``cached_param``: fixture caches per lane.
@@ -17,7 +17,8 @@ DESIGN.md, and ``probes.py`` checks it at startup:
 * P12 ``Cache.get``/``Cache.set``: serialized, so a concurrent read never sees a half-written value.
 * P14 ``unittest.mock._patch.__enter__`` / ``_patch_dict._patch_dict`` and ``pytest.MonkeyPatch``:
   fail closed on a process-wide patch in a test that is not exclusive.
-* P3 and P8 (logging) live in ``capture.py``; C1 (third-party plugins) in ``compat.py``.
+* P3, P8, P13 and P15 (output and logging) live in ``capture.py``; C1 and C2
+  (third-party plugins) in ``compat.py``.
 
 ``isolate_lanes()`` installs all of them together with the capture of
 ``capture.py`` and undoes them on exit.
@@ -430,7 +431,6 @@ def guard_warnings_recorder(is_exclusive):
     if getattr(sys.flags, "context_aware_warnings", False):
         yield
         return
-    import pytest
     from _pytest.recwarn import WarningsRecorder
 
     original = WarningsRecorder.__dict__["__enter__"]
@@ -504,6 +504,12 @@ PATCH_GUARD_SESSION_MESSAGE = (
     "turns this check off.")
 
 
+#: The pytest.MonkeyPatch methods the guard wraps (public API), all defined on the class.
+MONKEYPATCH_METHODS = ("setattr", "delattr", "setitem", "delitem", "setenv", "delenv", "chdir",
+                       "syspath_prepend")
+MONKEYPATCH_ALWAYS = ("setenv", "delenv", "chdir", "syspath_prepend")   # always process-wide
+
+
 def check_p14():
     """Probe: unittest.mock's patchers still look as ``guard_process_patches`` expects."""
     from unittest import mock
@@ -520,6 +526,11 @@ def check_p14():
         return "P14 unittest.mock._patch.getter no longer tells a dotted path from an object"
     if not hasattr(mock.patch.dict({}), "in_dict"):
         return "P14 unittest.mock._patch_dict.in_dict"
+    import pytest
+
+    missing = [m for m in MONKEYPATCH_METHODS if not callable(vars(pytest.MonkeyPatch).get(m))]
+    if missing:
+        return f"P14 pytest.MonkeyPatch no longer defines {missing}"
     return None
 
 
@@ -558,11 +569,8 @@ def _held_by_a_module(obj) -> bool:
 
 def _patch_by_path(patcher) -> bool:
     """``mock.patch("pkg.mod.obj.attr")``: whatever the path reaches is a global."""
-    getter = patcher.getter
-    if isinstance(getter, functools.partial):          # partial(pkgutil.resolve_name, path)
-        return bool(getter.args) and isinstance(getter.args[0], str)
-    cells = getattr(getter, "__closure__", None) or ()  # older: lambda: _importer(path)
-    return any(isinstance(c.cell_contents, str) for c in cells)
+    getter = patcher.getter                             # partial(pkgutil.resolve_name, path)
+    return isinstance(getter, functools.partial) and bool(getter.args) and isinstance(getter.args[0], str)
 
 
 #: Callers whose process-wide writes are a required plugin's own business (invariant 4):
@@ -574,7 +582,7 @@ def _patch_by_path(patcher) -> bool:
 EXEMPT_CALLERS = ("_pytest.unittest", "pytest_cov", "coverage")
 
 
-def _from_pytest(frame) -> bool:
+def _exempt_caller(frame) -> bool:
     name = frame.f_globals.get("__name__") or ""
     return any(name == m or name.startswith(m + ".") for m in EXEMPT_CALLERS)
 
@@ -588,7 +596,6 @@ def _importing(frame) -> bool:
             return True
         frame = frame.f_back
     return False
-
 
 
 #: Modules whose frames stand between a write to os.environ and the code that made it.
@@ -635,7 +642,7 @@ def guard_process_patches(config, is_exclusive):
 
     def check(what: str, frame, note: str = "") -> None:
         lane = LANE.get()
-        if lane is None or os.getpid() != pid or _from_pytest(frame):
+        if lane is None or os.getpid() != pid or _exempt_caller(frame):
             return                      # (a forked child's state is its own)
         item = lane.current_item
         if item is None or lane.gateway.id == "ln-serial":   # the serial phase runs alone
@@ -711,16 +718,6 @@ def guard_process_patches(config, is_exclusive):
         return make
 
     mp = pytest.MonkeyPatch
-    install(mock._patch, "__enter__", mock_enter)
-    install(mock._patch_dict, "_patch_dict", mock_patch_dict)
-    install(mp, "setattr", mp_attr("setattr"))
-    install(mp, "delattr", mp_attr("delattr"))
-    install(mp, "setitem", mp_item("setitem"))
-    install(mp, "delitem", mp_item("delitem"))
-    install(mp, "setenv", mp_always("monkeypatch.setenv"))
-    install(mp, "delenv", mp_always("monkeypatch.delenv"))
-    install(mp, "chdir", mp_always("monkeypatch.chdir"))
-    install(mp, "syspath_prepend", mp_always("monkeypatch.syspath_prepend"))
 
     active = [True]
 
@@ -743,8 +740,16 @@ def guard_process_patches(config, is_exclusive):
         key = args[0].decode(errors="replace") if isinstance(args[0], bytes) else args[0]
         check(f"a write to os.environ[{key!r}]", frame, ENVIRON_NOTE)
 
-    sys.addaudithook(audit)
-    try:
+    try:                               # installed inside: a failure part-way restores the rest
+        install(mock._patch, "__enter__", mock_enter)
+        install(mock._patch_dict, "_patch_dict", mock_patch_dict)
+        for verb in ("setattr", "delattr"):
+            install(mp, verb, mp_attr(verb))
+        for verb in ("setitem", "delitem"):
+            install(mp, verb, mp_item(verb))
+        for verb in MONKEYPATCH_ALWAYS:
+            install(mp, verb, mp_always(f"monkeypatch.{verb}"))
+        sys.addaudithook(audit)
         yield
     finally:
         active[0] = False

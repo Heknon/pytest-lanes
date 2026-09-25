@@ -50,31 +50,31 @@ The result is that process-level xdist protocol plugins (pytest-cov, pytest-meta
 
 ## Private touchpoints
 
-Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if a probe fails. P1 and P5 have no startup probe yet; the contract tests cover them. Each patch lives in the module named in CLAUDE.md's file map, with its install and restore in one context manager.
+Touchpoints are probed at startup (`probes.py`), and the plugin fails closed if a probe fails. P1 has no startup probe; the contract tests cover it. Each patch lives in the module named in CLAUDE.md's file map, with its install and restore in one context manager.
 
 | # | Touchpoint | Why |
 |---|---|---|
 | P1 | `session._setupstate` | Gives each lane its own SetupState |
 | P2 | `FixtureDef.cached_result` / `_finalizers` / `cached_param` | Per-lane fixture caches, and the param pytest's `--setup-show` keeps on the FixtureDef |
-| P3 | `LoggingPlugin.caplog_handler` / `report_handler` | Per-lane log capture |
+| P3 | `LoggingPlugin.caplog_handler` / `report_handler` / `log_level`; `catching_logs.__enter__` | Per-lane log capture; non-propagating loggers routed as the installed pytest captures them |
 | P4 | pluggy `_inner_hookexec` | Routes controller hooks to the main thread |
-| P5 | `item._nodeid` | Adds the `@group` suffix under loadgroup, as xdist's worker does |
+| P5 | `item._nodeid`; xdist's `WorkerInteractor.pytest_collection_modifyitems` | Adds the `@group` suffix under loadgroup with the installed xdist's own code |
 | P6 | `_pytest.runner._update_current_test_var`; `os.environ.__class__` | `PYTEST_CURRENT_TEST`, `PYTEST_XDIST_WORKER` and `_COUNT` per lane, kept out of the process environment |
-| P7 | `config._tmp_path_factory` / `_tmpdirhandler` | A basetemp per lane, like xdist's per-worker basetemp; the process's basetemp is created under a lock |
+| P7 | `config._tmp_path_factory` / `_tmpdirhandler` | A basetemp per lane, like xdist's per-worker basetemp; the process's basetemp is created under a lock. pytest's `cleanup_dead_symlinks` runs on lane basetemps when it exists |
 | P8 | `logging.Logger.manager.loggerDict` | pytest ≥ 9 iterates it at every test phase; views are served from a copy so concurrent logger creation cannot break that |
 | P9 | `_pytest.doctest.DoctestItem` | Doctests run exclusively, because doctest swaps `sys.stdout` for the whole process |
 | P10 | `config.__class__` (per-lane `workerinput`/`workeroutput`) | Each lane is its own xdist worker for `worker_id`, `testrun_uid` and `xdist.get_xdist_worker_id()` |
 | P11 | `WarningsRecorder.__enter__` | Before 3.14: `pytest.warns`/`deprecated_call`/`recwarn` in a non-exclusive test fail with instructions |
 | C1 | pytest-rerunfailures `ClientStatusDB` | Hybrid only; its one per-worker socket is serialized across lanes |
 | C2 | pytest-rerunfailures ≥ 16 `suspended_finalizers` | Per lane: a test about to be rerun parks its setup stack there, and another lane's teardown took it |
-| X1 | xdist scheduler protocol | Semi-public; probed on each scheduler instance |
+| X1 | xdist scheduler protocol | Semi-public; checked on each scheduler instance, in both modes |
 | X2 | `WorkerInteractor.channel` / `.sendevent` / `.item_index` | Hybrid mode only |
 | X3 | `DSession.handle_crashitem` | Hybrid mode only; reports the 2nd and later crashed lanes of one worker |
-| X4 | `WorkerController.workerinput` / `workerinfo` / `workeroutput` | Hybrid mode only; mirrored on each `LaneProxy` so custom schedulers see worker-shaped nodes |
+| X4 | `WorkerController.workerinput` / `workerinfo` / `workeroutput` / `shutting_down` | Hybrid mode only; mirrored on each `LaneProxy` so custom schedulers see worker-shaped nodes, and never sent work once the worker is down or draining |
 | P12 | `_pytest.cacheprovider.Cache.get` / `.set` | Serialized per process: a concurrent read saw a half-written value |
 | P13 | stdlib `contextlib._RedirectStream.__enter__` / `__exit__` | `redirect_stdout`/`redirect_stderr` redirect only the lane that entered them |
 | P14 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict`; `pytest.MonkeyPatch`; audit events `os.putenv`/`os.unsetenv`/`os.chdir` (public) | The patch guard: a process-wide patch or direct environment/cwd write in a test that is not exclusive fails at once |
-| P15 | `CaptureManager.suspend_global_capture` / `resume_global_capture` | On a lane they also suspend the test's capture fixture, so a plugin's terminal output (`--setup-show`) is not captured by the test's capfd |
+| P15 | `CaptureManager.suspend_global_capture` / `resume_global_capture` | On a lane they also suspend the test's capture fixture, so a plugin's terminal output (`--setup-show`) is not captured by the test's capfd (and `CaptureFixture._is_started`) |
 | D1 | stdlib `unittest.mock._patch.__enter__`, `_patch_dict._patch_dict` / `_unpatch_dict`, `contextlib._RedirectStream` | `--lanes-detect` only (never in a lanes run); records patches made inside a test body |
 
 ## Correctness defences
@@ -152,14 +152,14 @@ A reasonable starting point is 8–16 processes × 25–50 lanes. Then adjust us
 | F7 | **`each` and `worksteal` modes are unsupported.** xdist's `worksteal` moves single tests, which would split an environment; only stealing whole, not-yet-started scopes would suit environment suites. `--pdb` is unsupported, as under xdist: debug a test by running it without `--lanes` |
 | F8 | **Ctrl-C** interrupts every lane and runs its teardown; a lane blocked in one long C call cannot be interrupted and is abandoned after `lanes_interrupt_grace`, named. SIGTERM kills the process without teardown, as it does plain pytest |
 | F9 | **`--lanes` means lanes per process in hybrid mode.** The total is `-n` × `--lanes`. |
-| F17 | **`PYTEST_CURRENT_TEST` in subprocesses.** In-process it is per lane (P6). It is not in the process environment, so a subprocess started without `env=` does not see it (under xdist it would); pass `env=os.environ.copy()` |
 | F11 | **`PYTEST_XDIST_WORKER` in subprocesses.** In-process, `os.environ["PYTEST_XDIST_WORKER"]` and `_COUNT` name the lane (P6), like `worker_id` (P10). A subprocess started without `env=` sees the process's value (the worker's, `gw0`, in hybrid mode; none in single-process mode); pass `env=os.environ.copy()` |
 | F12 | **Warning capture before Python 3.14** is process-wide: `pytest.warns`, `deprecated_call` and `recwarn` fail closed in a test that is not `lanes_exclusive` (P11). `warnings.catch_warnings` used directly, in tests or libraries, cannot be guarded. On 3.14+ with context-aware warnings all of these are safe |
 | F13 | **Per-test timeouts.** In single-process mode pytest-timeout would fall back to its thread method, which `os._exit`s the whole process on a timeout, so it is refused there (option, ini, `PYTEST_TIMEOUT` or marker); it works in hybrid mode, where xdist replaces the killed worker. `faulthandler_timeout` is refused in both lane modes, because its process-wide timer never fires for the hung test |
 | F14 | **`signal.signal` in a test raises `ValueError`** under lanes: Python allows it on the main thread only. |
 | F15 | **Worker-side `pytest_runtest_logreport` consumers see reports late.** In xdist a conftest's implementation also runs synchronously in the worker; under lanes it runs only on the main thread, after the test's teardown. For example, a fixture teardown that reads what a conftest `logreport` recorded finds nothing. Use `pytest_runtest_makereport`, which runs on the lane. |
-| F18 | **A thread pool shared between tests** (a module-level `ThreadPoolExecutor`) keeps, on Python 3.14 with `thread_inherit_context`, the lane context of the test that started its threads: a later test's task run there has its output, logs, `PYTEST_CURRENT_TEST` and patch-guard decisions attributed to that first lane. Submit with `contextvars.copy_context().run`, or use a pool per test. Before 3.14 such output is unattributed (F3). `repr(os.environ)`, `os.environb` and pickling do not show the per-lane values of P6. |
 | F16 | **Per-item overhead on GIL builds.** Each item waits for the main thread to replay its reports. With many CPU-busy lanes the main thread rarely gets the GIL: 3,000 tiny tests took 13s on 1 lane but 108s on 4 lanes and about 200s on 20–200 lanes on 3.12 (7s on 3.14t). It is negligible for long I/O-bound tests. |
+| F17 | **`PYTEST_CURRENT_TEST` in subprocesses.** In-process it is per lane (P6). It is not in the process environment, so a subprocess started without `env=` does not see it (under xdist it would); pass `env=os.environ.copy()` |
+| F18 | **A thread pool shared between tests** (a module-level `ThreadPoolExecutor`) keeps, on Python 3.14 with `thread_inherit_context`, the lane context of the test that started its threads: a later test's task run there has its output, logs, `PYTEST_CURRENT_TEST` and patch-guard decisions attributed to that first lane. Submit with `contextvars.copy_context().run`, or use a pool per test. Before 3.14 such output is unattributed (F3). `repr(os.environ)`, `os.environb` and pickling do not show the per-lane values of P6. |
 
 ## Compatibility plan
 

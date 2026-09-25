@@ -1,4 +1,4 @@
-import logging, time, threading, pytest
+import threading, pytest
 SETUPS = []
 @pytest.fixture(scope="session")
 def env(request):

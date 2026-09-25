@@ -16,7 +16,7 @@ recorder catches these as they happen:
   which cover direct ``os.environ`` writes and ``os.chdir``;
 * the stdlib's process-wide setters (``SETTERS``: ``random.seed``,
   ``socket.setdefaulttimeout``, ``locale.setlocale``, ``os.umask``, ...), called
-  from anywhere but pytest's own machinery. Each broke concurrent tests in round 4;
+  from anywhere but pytest's own machinery. Each breaks concurrent tests;
 * ``sys.stdout``/``stderr``/``stdin`` replaced during a test (click's CliRunner, a
   direct assignment), sampled every ``STDIO_INTERVAL`` seconds and at every audit
   event (opening a file, importing, starting a subprocess...), so a swap shorter
@@ -30,6 +30,7 @@ hook, which Python cannot remove: it is disabled instead.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import os
 import sys
 import threading
@@ -37,6 +38,7 @@ import types
 
 import pytest
 
+from ..isolation import _patch_by_path, _shared
 from .sources import IGNORED_ENV
 
 _NOTSET = object()
@@ -104,8 +106,6 @@ def _label(target, attribute=None, paths=None):
     (P14): modules, classes and instances a module holds are shared, anything else is
     presumed the test's own.
     """
-    from ..isolation import _shared
-
     t = type(target)
     if issubclass(t, types.ModuleType):
         base = f"module:{target.__name__}"
@@ -210,14 +210,8 @@ class Recorder:
                 setattr(owner, name, make(original))
                 stack.callback(setattr, owner, name, original)
 
-            def patch_attr_module(module, name, make):
-                original = vars(module)[name]
-                setattr(module, name, make(original))
-                stack.callback(setattr, module, name, original)
-
             def mock_enter(original):
                 def __enter__(self):
-                    from ..isolation import _patch_by_path
                     try:
                         label = _label(self.getter(), self.attribute, rec.paths)
                         if label is None and _patch_by_path(self):
@@ -340,12 +334,10 @@ class Recorder:
                     return call
                 return wrap
 
-            import importlib
-
             for module, name in SETTERS:
                 owner = importlib.import_module(module)
                 if name in vars(owner):
-                    patch_attr_module(owner, name, setter(module, name))
+                    patch_attr(owner, name, setter(module, name))
 
             def redirect_enter(original):
                 def __enter__(self):

@@ -199,7 +199,7 @@ def test_canary_suite_under_switching_pressure(pytester, name):
     assert rows == xdist_rows
 
 
-# ---------------------------------------------------------------- stdio replaced while lanes run (round 4)
+# ---------------------------------------------------------------- stdio replaced while lanes run
 SWAPPER = """
 import io, sys, time, pytest
 {mark}
@@ -250,7 +250,7 @@ def test_capsys_and_no_capture_raise_no_stdio_alarm(pytester):
 
 def test_lanes_waiting_for_an_exclusive_test_are_not_running(pytester):
     # A lane queued behind an exclusive test counted as running a test, so a lone test
-    # replacing sys.stdout failed the run although nothing ran beside it (round-5 review).
+    # replacing sys.stdout failed the run although nothing ran beside it.
     pytester.makepyfile(test_x="""
         import io, sys, time, pytest
         def test_a_swap():
@@ -281,3 +281,13 @@ def test_stdio_message_is_accurate_with_no_capture(pytester):
     """)
     r = run(pytester, "--lanes", "3", "-s", timeout=60)
     assert_integrity_failure(r, "sys.stdout was replaced", "with -s")
+
+
+def test_duplicate_items_under_a_scope_scheduler(pytester):
+    # xdist's loadscope keys its work by nodeid, so an item collected twice runs once:
+    # the completeness check called that a lost test (INTERNALERROR), where -n runs green.
+    pytester.makepyfile(test_d="def test_a(): pass\ndef test_b(): pass\n")
+    for args in (["--lanes-dist", "loadscope"], ["--lanes-dist", "load"]):
+        r = run(pytester, "--keep-duplicates", "test_d.py", "test_d.py", "--lanes", "2", *args, timeout=60)
+        out = r.stdout.str()
+        assert r.ret == 0 and "integrity check failed" not in out, (args, out[-1500:])

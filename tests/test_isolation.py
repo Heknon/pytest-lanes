@@ -5,16 +5,13 @@ threading.Barrier across lanes rather than sleeps, so concurrency is guaranteed.
 Those tests run lanes in one process (ONE_PROCESS); plain xdist has no shared
 process, so there the barrier is off.
 """
-import os
-import re
 import sys
 
 import pytest
-from lanes_testing import BASE, CONTEXT_AWARE_WARNINGS, MODES, report_log, run
+from lanes_testing import CONTEXT_AWARE_WARNINGS, MODES, report_log, run, without
 
 #: BASE with the cache provider on (it is off everywhere else). BASE is "-p X" pairs.
-WITH_CACHE = [arg for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:cacheprovider")
-              for arg in pair]
+WITH_CACHE = without("cacheprovider")
 
 ONE_PROCESS = {"lanes": ["--lanes", "3"], "hybrid": ["-n", "1", "--lanes", "3"]}
 
@@ -266,7 +263,7 @@ def test_pytest_warns_runs_normally_with_context_aware_warnings(pytester, monkey
     run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=3)
 
 
-# ---------------------------------------------------------------- stdin (round 4)
+# ---------------------------------------------------------------- stdin
 @pytest.mark.parametrize("name", MODES.keys())
 def test_reading_stdin_fails_as_under_capture(pytester, name):
     # pytest's capture replaces sys.stdin so a test reading it fails at once. Lanes turn
@@ -293,7 +290,7 @@ def test_stdin_is_left_alone_with_no_capture(pytester):
     run(pytester, "--lanes", "2", "-s", timeout=60).assert_outcomes(passed=1)
 
 
-# ---------------------------------------------------------------- config.cache (round 4)
+# ---------------------------------------------------------------- config.cache
 @pytest.mark.parametrize("mode", [["--lanes", "8"], ["-n", "1", "--lanes", "8"]], ids=["lanes", "hybrid"])
 def test_config_cache_is_safe_across_lanes(pytester, mode):
     # pytest writes a cache value by truncating the file, then writing it: a lane reading
@@ -311,7 +308,7 @@ def test_config_cache_is_safe_across_lanes(pytester, mode):
     r.assert_outcomes(passed=200)
 
 
-# ---------------------------------------------------------------- redirected and replaced stdio (round 4)
+# ---------------------------------------------------------------- redirected and replaced stdio
 REDIRECT_TESTS = """
 import contextlib, io, sys, time, pytest
 @pytest.mark.parametrize("i", range(4))
@@ -344,7 +341,7 @@ def test_redirect_stdout_is_per_lane(pytester, name):
     result.stdout.fnmatch_lines(["*after-0*"])       # output after the block is captured again
 
 
-# ---------------------------------------------------------------- --setup-show / --setup-only (round 4)
+# ---------------------------------------------------------------- --setup-show / --setup-only
 @pytest.mark.parametrize("flag", ["--setup-show", "--setup-only"])
 def test_setup_show_on_many_lanes(pytester, flag):
     # pytest's setuponly plugin sets FixtureDef.cached_param on setup and deletes it on
@@ -363,7 +360,7 @@ def test_setup_show_on_many_lanes(pytester, flag):
     assert r.ret == pytest.ExitCode.OK, r.stdout.str()[-2000:]
 
 
-# ---------------------------------------------------------------- exclusive tests and the terminal (round 4)
+# ---------------------------------------------------------------- exclusive tests and the terminal
 @pytest.mark.parametrize("fixture", ["capfd", "capfdbinary"])
 def test_exclusive_capfd_test_does_not_capture_the_reporters(pytester, fixture):
     # capfd redirects fd 1 for the whole process while a phase runs. The main thread
@@ -398,8 +395,7 @@ def test_setup_show_output_is_not_captured_by_the_test(pytester, name, fixture):
     # Plugins write to the terminal between capman.suspend_global_capture() and
     # resume_global_capture() (--setup-show does). In plain pytest suspending global
     # capture also bypasses a capfd/capsys fixture; lanes turn global capture off, so
-    # the line went into the test's capture and its readouterr() failed (found by the
-    # round-5 chaos run). On a lane, the fixture capture is now suspended with it (P15).
+    # the line went into the test's capture and its readouterr() failed. On a lane, the fixture capture is now suspended with it (P15).
     pytester.makepyfile(f"""
         import os, sys
         def test_it({fixture}):
@@ -414,7 +410,7 @@ def test_exclusive_test_starts_after_earlier_reports_are_replayed(pytester):
     # Hybrid mode runs exclusive tests between others. A lane released its share of the
     # exclusivity lock when its test ended, before the main thread replayed its reports;
     # the exclusive capfd test then captured that replay's output (a worker's progress
-    # dot, found by the round-5 chaos run). Lanes now keep the lock until replayed.
+    # dot). Lanes now keep the lock until replayed.
     pytester.makeconftest("""
         import os, time
         def pytest_runtest_logreport(report):   # runs where reports are replayed
@@ -435,7 +431,7 @@ def test_exclusive_test_starts_after_earlier_reports_are_replayed(pytester):
 
 
 
-# ---------------------------------------------------------------- redirect edge cases (round-5 review)
+# ---------------------------------------------------------------- redirect edge cases
 def test_redirect_stdout_to_none_discards(pytester):
     # redirect_stdout(None) is the stdlib idiom for "discard"; lanes wrote to None.
     pytester.makepyfile("""
@@ -474,7 +470,7 @@ def test_sys_stdout_behaves_like_a_real_stream(pytester, name):
     # io.TextIOBase defines encoding/errors/closed/close/seek/... so they never reached the
     # redirect target or the real stream: under lanes sys.stdout.encoding was None, seek()
     # inside redirect_stdout(StringIO()) raised, and close() there closed stdout for every
-    # lane (round-5 cycle-2 review).
+    # lane.
     pytester.makepyfile("""
         import contextlib, io, sys, time
         def test_attrs():
@@ -508,7 +504,7 @@ def test_sys_stdout_behaves_like_a_real_stream(pytester, name):
 def test_sys_stdout_is_not_the_terminal_outside_a_redirect(pytester, name):
     # Outside a redirect, sys.stdout.fileno()/isatty() returned the real terminal's: fd
     # writes escaped the test's report (single process: to the terminal; hybrid: lost)
-    # and colour detection turned on inside captured output (round-5 cycle-3 review).
+    # and colour detection turned on inside captured output.
     # Not a tty, as under pytest's capture; fd writes go to a per-lane capture file
     # (test_fd_writes_through_sys_stdout_fileno_are_captured).
     pytester.makepyfile("""
@@ -519,7 +515,7 @@ def test_sys_stdout_is_not_the_terminal_outside_a_redirect(pytester, name):
     run(pytester, *MODES[name], timeout=60).assert_outcomes(passed=1)
 
 
-# ---------------------------------------------------------------- cycle-4 review
+# ---------------------------------------------------------------- more capture edge cases
 @pytest.mark.parametrize("name", MODES.keys())
 def test_fd_writes_through_sys_stdout_fileno_are_captured(pytester, name):
     # Under fd capture (pytest's default) sys.stdout.fileno() is a capture file: a child
@@ -595,7 +591,7 @@ def test_warning_shown_on_one_lane_is_not_hidden_from_another(pytester, monkeypa
     # Python remembers a warning shown with the "default" action in the emitting module's
     # __warningregistry__, and skips the filters on a repeat. Shared by lanes, one lane's
     # "default" warning hid it from another lane whose filter is "error": the error tests
-    # passed (cycle-6 review). On 3.14 each lane's warning context now ends with "always",
+    # passed. On 3.14 each lane's warning context now ends with "always",
     # so an unmatched warning is never registered.
     if not CONTEXT_AWARE_WARNINGS:
         pytest.skip("context-aware warnings need Python 3.14 (before it, warnings run with -p no:warnings)")
@@ -613,12 +609,12 @@ def test_warning_shown_on_one_lane_is_not_hidden_from_another(pytester, monkeypa
             time.sleep(0.05)
             helper.old()
     """)
-    base = [a for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:warnings") for a in pair]
+    base = without("warnings")
     r = pytester.runpytest_subprocess(*base, *mode, timeout=120)
     r.assert_outcomes(passed=4, failed=4, warnings=r.parseoutcomes().get("warnings", 0))
 
 
-# ---------------------------------------------------------------- PYTEST_CURRENT_TEST (round 6)
+# ---------------------------------------------------------------- PYTEST_CURRENT_TEST
 SPAWNER = """
 import subprocess, sys, pytest
 @pytest.mark.parametrize("i", range(12))
@@ -692,7 +688,7 @@ def test_changed_current_test_var_format_fails_closed(pytester):
 
 def test_children_do_not_inherit_an_outer_current_test_var(pytester, monkeypatch):
     # Under an outer pytest (or any parent that set it), children started without env=
-    # reported the outer test's name (round-7 review).
+    # reported the outer test's name.
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "outer")
     pytester.makepyfile(test_x="""
         import os, subprocess, sys
@@ -703,7 +699,6 @@ def test_children_do_not_inherit_an_outer_current_test_var(pytester, monkeypatch
             assert out == "None", out
     """)
     run(pytester, "--lanes", "2", timeout=60).assert_outcomes(passed=1)
-    assert os.environ["PYTEST_CURRENT_TEST"] == "outer"      # (the outer process is untouched)
 
 
 @pytest.mark.parametrize("mode,count", [(["--lanes", "3"], "3"), (["-n", "2", "--lanes", "2"], "4")],

@@ -12,7 +12,7 @@ import json
 import pytest
 from lanes_testing import run
 
-DETECT = ["--lanes-detect", "-p", "no:randomly"]
+DETECT = ["--lanes-detect"]
 
 
 def detect(pytester, *args, timeout=60):
@@ -211,15 +211,20 @@ def test_clean_suite_reports_nothing_unsafe(pytester):
 
 # ---------------------------------------------------------------- walk safety and usage
 def test_walk_never_calls_properties_and_survives_odd_objects(pytester):
+    # The walk swallows errors, so an exception alone would go unseen: each hook also
+    # leaves a marker file.
     pytester.makepyfile(infra="""
+        import pathlib
+        def touched(what):
+            (pathlib.Path(__file__).parent / f"EVALUATED-{what}").touch()
         class Boom:
             @property
             def value(self):
-                raise RuntimeError("a property was evaluated")
+                touched("property"); raise RuntimeError("a property was evaluated")
             def __getattr__(self, name):
-                raise RuntimeError("__getattr__ was called")
+                touched("getattr"); raise RuntimeError("__getattr__ was called")
             def __eq__(self, other):
-                raise RuntimeError("__eq__ was called")
+                touched("eq"); raise RuntimeError("__eq__ was called")
             __hash__ = object.__hash__
         class Slotted:
             __slots__ = ("x",)
@@ -240,6 +245,7 @@ def test_walk_never_calls_properties_and_survives_odd_objects(pytester):
     r, report = detect(pytester)
     r.assert_outcomes(passed=2)
     assert "module:infra.SLOTTED.x" in findings(report, "per-test"), report
+    assert not list(pytester.path.glob("EVALUATED-*")), list(pytester.path.glob("EVALUATED-*"))
 
 
 @pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "2"]], ids=["lanes", "xdist"])
@@ -296,9 +302,9 @@ def test_ok_findings_are_counted_not_listed(pytester):
     r.stdout.fnmatch_lines(["*1 set-once (caches set once, then stable)*JSON*"])
 
 
-# ---------------------------------------------------------------- process-wide setters and stdio (round 4)
+# ---------------------------------------------------------------- process-wide setters and stdio
 def test_process_wide_setters_and_stdio_swaps_are_recorded(pytester):
-    # Each broke concurrent tests in round 4 while the detector saw nothing.
+    # Each breaks concurrent tests, and a snapshot alone would not see it.
     pytester.makepyfile(test_a="""
         import contextlib, gc, io, random, socket, sys
         def test_seed():
@@ -333,7 +339,7 @@ def test_process_wide_setters_and_stdio_swaps_are_recorded(pytester):
     assert "test_a.py::test_private_rng_is_fine" not in unsafe_tests, report
 
 
-# ---------------------------------------------------------------- round 6 review
+# ---------------------------------------------------------------- odd objects, sets, labels
 def test_hostile_globals_neither_crash_nor_fail_tests(pytester):
     # isinstance() reads __class__: a dead weakref.proxy or a werkzeug-like LocalProxy
     # raised INTERNALERROR, and a spec'd mock passed isinstance(x, dict) and then broke
@@ -489,7 +495,7 @@ def test_short_stdio_swap_is_recorded(pytester):
     assert "sys.stdout" in findings(report, "patched"), report["findings"]
 
 
-# ---------------------------------------------------------------- round 7 review
+# ---------------------------------------------------------------- fixture attribution, the node cap, labels
 def test_deleted_sys_stdin_and_proxy_modules_do_not_crash(pytester):
     pytester.makeconftest("""
         import sys
@@ -518,8 +524,9 @@ def test_deleted_sys_stdin_and_proxy_modules_do_not_crash(pytester):
     r, report = detect(pytester)
     r.assert_outcomes(passed=3)
     # Deleting sys.stdin is a real process-wide patch; the local instances are not.
-    assert not [f for f in report["findings"] if f["kind"] == "patched"
-                and not f["path"].endswith("sys.stdin")], report
+    patched = [f["path"] for f in report["findings"] if f["kind"] == "patched"]
+    assert any(p.endswith("sys.stdin") for p in patched), report
+    assert all(p.endswith("sys.stdin") for p in patched), report
 
 
 FIXTURE_ORDER = {

@@ -1,4 +1,4 @@
-"""Per-lane output capture: stdout/stderr and logging (touchpoints P3, P8).
+"""Per-lane output capture: stdout/stderr, redirects and logging (touchpoints P3, P8, P13, P15).
 
 pytest's own capture is process-wide, so lanes switch it off (``--capture=no``)
 and capture per lane instead:
@@ -322,6 +322,10 @@ def check_p15(config):
         return "P15 CaptureManager.suspend/resume_global_capture, suspend/resume_fixture"
     if "_capture_fixture" not in vars(capman):
         return "P15 CaptureManager._capture_fixture"
+    from _pytest.capture import CaptureFixture
+
+    if not callable(getattr(CaptureFixture, "_is_started", None)):
+        return "P15 CaptureFixture._is_started"
     return None
 
 

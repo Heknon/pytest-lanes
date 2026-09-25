@@ -2,8 +2,7 @@
 
 Lanes share one process, so ``mock.patch`` on a module or class, ``monkeypatch.setattr``
 on one, environment variables, ``chdir`` and ``sys.path`` are seen by every test
-running meanwhile: they broke concurrent tests silently (round 4: 3 of 4 mocker tests
-failed, others passed for the wrong reason). Like pytest.warns before 3.14 (P11), such
+running meanwhile: they broke concurrent tests silently. Like pytest.warns before 3.14 (P11), such
 a test now fails with instructions, unless it is ``lanes_exclusive``, marked
 ``lanes_allow_patches``, or the run passes ``--lanes-allow-patches``. Session-scoped
 fixtures are guarded too: each lane tears its own down when it finishes, undoing the
@@ -70,8 +69,7 @@ UNSAFE = {
             monkeypatch.setitem(os.environ, "LANES_X", "1")
     """,
     # Each lane has its own session fixture: the first lane to finish tears it down and
-    # undoes the variable for the whole process while other lanes still read it
-    # (KeyError in the round-5 chaos run).
+    # undoes the variable for the whole process while other lanes still read it (a KeyError).
     "session_fixture_env": """
         import pytest
         @pytest.fixture(scope="session", autouse=True)
@@ -82,7 +80,7 @@ UNSAFE = {
         def test_it():
             pass
     """,
-    # The most common form: a settings object reached by dotted path (round-5 review).
+    # The most common form: a settings object reached by dotted path.
     "mock_patch_dotted_instance": """
         from unittest import mock
         def test_it():
@@ -97,7 +95,7 @@ UNSAFE = {
         def test_it(patched):
             pass
     """,
-    # Direct writes (round 6): os.putenv/unsetenv/chdir audit events. Besides being seen by
+    # Direct writes: os.putenv/unsetenv/chdir audit events. Besides being seen by
     # every lane, an environment write while another lane starts a subprocess made that
     # spawn fail with "OSError: [Errno 14] Bad address".
     "environ_direct_write": """
@@ -240,7 +238,7 @@ def test_mocker_is_guarded(pytester):
 def test_pytest_s_own_patches_are_not_guarded(pytester, monkeypatch):
     # pytest's unittest plugin monkeypatches twisted's Failure.__init__ around every
     # test once twisted.trial is imported (twisted <= 24): the guard failed every test,
-    # outside its call phase, as an INTERNALERROR (round-5 review). pytest's own patches
+    # outside its call phase, as an INTERNALERROR. pytest's own patches
     # are its business.
     site = pytester.mkdir("site")
     for path, text in {"twisted/__init__.py": "", "twisted/python/__init__.py": "",
@@ -263,7 +261,7 @@ def test_pytest_s_own_patches_are_not_guarded(pytester, monkeypatch):
 
 def test_pytester_is_guarded(pytester):
     # pytester changes the cwd and environment for the process: exempting all of pytest
-    # (for its twisted support) let it do that under other lanes (round-5 cycle-2 review).
+    # (for its twisted support) let it do that under other lanes.
     pytester.makeconftest('pytest_plugins = ["pytester"]')
     pytester.makepyfile("""
         def test_uses_pytester(pytester):
@@ -314,7 +312,7 @@ def test_factory_made_module_class_is_shared(pytester):
 
 def test_marker_exempts_broader_scoped_fixture_patches(pytester):
     # The marker says this test's patches are safe; it stopped covering its module- and
-    # class-scoped fixtures when the scope check moved first (round-5 cycle-3 review).
+    # class-scoped fixtures when the scope check moved first.
     pytester.makepyfile(helper_mod="VALUE = 0\n")
     pytester.makepyfile("""
         import pytest
@@ -365,7 +363,7 @@ def test_nested_module_class_is_shared(pytester):
 
 def test_module_level_instance_is_shared(pytester):
     # A settings singleton held by a module is shared by every lane, like a class; the
-    # guard let monkeypatch.setattr(settings_mod.settings, ...) through (cycle-6 review).
+    # guard let monkeypatch.setattr(settings_mod.settings, ...) through.
     pytester.makepyfile(settings_mod="class _S:\n    DEBUG = False\nsettings = _S()\n")
     pytester.makepyfile("""
         import settings_mod
@@ -399,7 +397,7 @@ def test_direct_environment_write_message_names_the_subprocess_hazard(pytester):
                              r"breaks subprocesses.*Bad address"])
 
 
-# ---------------------------------------------------------------- round 7 review: false failures
+# ---------------------------------------------------------------- no false failures
 FORKED = """
 import os, multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
@@ -432,7 +430,7 @@ def test_raw_fork():
 @pytest.mark.parametrize("name", LANE_MODES)
 def test_forked_child_owns_its_environment(pytester, name):
     # A child made by fork inherits the lane and the audit hook: its private environment
-    # write failed (round-7 review).
+    # write failed.
     pytester.makepyfile(FORKED)
     run(pytester, *LANE_MODES[name], timeout=60).assert_outcomes(passed=3)
 

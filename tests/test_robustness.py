@@ -8,20 +8,12 @@ import sys
 
 import _pytest.runner
 import pytest
-from lanes_testing import BASE, MODES, run
+from lanes_testing import BASE, ENV_SCHED, MODES, run, without
 
 #: pytest >= 8.1 tears a test down fully once the session is stopping (-x). Older
 #: runners leave session fixtures to the end of the session, even without xdist.
 RUNNER_TEARS_DOWN_ON_STOP = "shouldfail" in inspect.getsource(_pytest.runner.runtestprotocol)
 
-ENV_SCHEDULER = """
-from xdist.scheduler import LoadScopeScheduling
-class EnvScheduling(LoadScopeScheduling):
-    def _split_scope(self, nodeid):
-        return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
-def pytest_xdist_make_scheduler(config, log):
-    return EnvScheduling(config, log)
-"""
 ENV_TESTS = """
 import pytest, time
 @pytest.mark.parametrize("step", range(3))
@@ -37,7 +29,7 @@ def test_s(env, step):
 def test_plugin_error_inside_protocol_ends_run_without_hanging(pytester, mode):
     # An exception escaping pytest_runtest_protocol kills that lane's thread (or xdist's
     # worker). Its remaining scope can never finish; the run must still end.
-    pytester.makeconftest(ENV_SCHEDULER + """
+    pytester.makeconftest(ENV_SCHED + """
 import pytest
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_protocol(item, nextitem):
@@ -53,7 +45,7 @@ def pytest_runtest_protocol(item, nextitem):
 
 @pytest.mark.parametrize("mode", MODES.values(), ids=MODES.keys())
 def test_keyboard_interrupt_in_a_test_ends_run_interrupted(pytester, mode):
-    pytester.makeconftest(ENV_SCHEDULER)
+    pytester.makeconftest(ENV_SCHED)
     body = 'if env == "envB" and step == 1: raise KeyboardInterrupt'
     pytester.makepyfile(ENV_TESTS.replace("{body}", body))
     r = run(pytester, *mode, timeout=60)
@@ -286,8 +278,8 @@ def test_faulthandler_timeout_is_refused(pytester, mode):
     r.stderr.fnmatch_lines(["*faulthandler_timeout*"])
 
 
-# ---------------------------------------------------------------- hybrid: interpreter flags (round 4)
-WARNINGS_ON = [a for pair in zip(BASE[::2], BASE[1::2]) if pair != ("-p", "no:warnings") for a in pair]
+# ---------------------------------------------------------------- hybrid: interpreter flags
+WARNINGS_ON = without("warnings")
 
 
 @pytest.mark.skipif(bool(getattr(sys.flags, "context_aware_warnings", False)),
@@ -319,7 +311,7 @@ def test_context_aware_warnings_flag_reaches_hybrid_workers(pytester, monkeypatc
     r.stdout.fnmatch_lines(["*1 passed, 1 warning*"])
 
 
-# ---------------------------------------------------------------- Ctrl-C (round 4)
+# ---------------------------------------------------------------- Ctrl-C
 INTERRUPTED_TESTS = """
 import os, pathlib, time, pytest
 OUT = pathlib.Path(os.environ["LANES_OUT"])
@@ -384,7 +376,7 @@ def test_ctrl_c_abandons_a_lane_blocked_past_the_grace_period(pytester):
 def test_ctrl_c_while_the_main_thread_handles_a_finished_test(pytester):
     # Ctrl-C while the main thread handled a lane's "item done" left that lane waiting
     # for an acknowledgement forever: the run waited out the grace period, and the
-    # lane's fixtures were never torn down (round-5 review).
+    # lane's fixtures were never torn down.
     import os
     import subprocess
     import time
@@ -427,7 +419,7 @@ def test_ctrl_c_while_the_main_thread_handles_a_finished_test(pytester):
 
 def test_keyboard_interrupt_raised_by_a_test_stops_the_run(pytester):
     # Only the raising lane stopped: the other ran everything else, and tests queued to
-    # the stopped lane silently never ran (round-5 review). xdist stops the run:
+    # the stopped lane silently never ran. xdist stops the run:
     # "1 failed, 2 passed", Interrupted.
     pytester.makepyfile("""
         import time, pytest
@@ -442,7 +434,7 @@ def test_keyboard_interrupt_raised_by_a_test_stops_the_run(pytester):
     assert r.parseoutcomes().get("passed", 0) <= 2, r.stdout.str()
 
 
-# ---------------------------------------------------------------- memory (round 5, cycle 2)
+# ---------------------------------------------------------------- memory
 @pytest.mark.parametrize("mode", [["--lanes", "4"], ["-n", "1", "--lanes", "4"]], ids=["lanes", "hybrid"])
 def test_fixture_definitions_do_not_accumulate(pytester, monkeypatch, mode):
     # pytest 9 makes a FixtureDef for `request` per test. Lanes kept per-lane fixture state
@@ -476,7 +468,7 @@ def test_fixture_definitions_do_not_accumulate(pytester, monkeypatch, mode):
 def test_keyboard_interrupt_with_a_slow_reporter(pytester, mode):
     # The lane-error check ran right after an event was dequeued and threw it away: a lost
     # "item done" left its lane waiting (grace period, no teardown), and in hybrid mode a
-    # test was reported both passed and crashed (round-5 cycle-2 review).
+    # test was reported both passed and crashed.
     import time
     pytester.makeini("[pytest]\nlanes_interrupt_grace = 30\n")   # waiting it out is unmistakable
     pytester.makeconftest("""
@@ -506,7 +498,7 @@ def test_keyboard_interrupt_with_a_slow_reporter(pytester, mode):
 @pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "2", "--lanes", "2"]], ids=["lanes", "hybrid"])
 def test_error_in_a_reporter_still_tears_the_lanes_down(pytester, monkeypatch, mode):
     # An exception in a main-thread hook (a plugin's logreport, a custom scheduler) left
-    # every lane without teardown; xdist's workers tear down (round-5 cycle-3 review).
+    # every lane without teardown; xdist's workers tear down.
     monkeypatch.setenv("LANES_OUT", str(pytester.path))
     pytester.makeconftest("""
         import os, pathlib, pytest
@@ -531,17 +523,16 @@ def test_error_in_a_reporter_still_tears_the_lanes_down(pytester, monkeypatch, m
     assert r.ret == pytest.ExitCode.INTERNAL_ERROR, r.stdout.str()
     lanes = 3 if mode[0] == "--lanes" else 4
     torn = list(pytester.path.glob("session-*"))
-    assert len(torn) >= min(lanes, 5) - 1, (torn, r.stdout.str()[-1500:])
+    assert len(torn) == lanes, (torn, r.stdout.str()[-1500:])   # every lane tore down
 
 
-# ---------------------------------------------------------------- cycle-4 review
+# ---------------------------------------------------------------- stopping and exclusivity
 def test_maxfail_stops_lanes_queued_behind_an_exclusive_test(pytester, monkeypatch):
     # Lanes checked for -x before taking the exclusivity lock, never after: lanes queued
     # behind an exclusive test all started once a failure had stopped the run. Nothing
     # may start after the failure (tests that started before it may finish).
     monkeypatch.setenv("LANES_OUT", str(pytester.path))
-    from test_contract import CUSTOM_SCHED
-    pytester.makeconftest(CUSTOM_SCHED)
+    pytester.makeconftest(ENV_SCHED)
     pytester.makepyfile("""
         import os, pathlib, time, pytest
         OUT = pathlib.Path(os.environ["LANES_OUT"])
@@ -595,7 +586,7 @@ def test_pytest_exit_tears_down_every_lane(pytester, monkeypatch, mode):
     assert len(torn) == 2, torn
 
 
-# ---------------------------------------------------------------- cycle-5 review (hybrid)
+# ---------------------------------------------------------------- hybrid
 def test_worker_crash_does_not_end_the_run(pytester, monkeypatch):
     # Removing a dead worker's lanes one by one let xdist reschedule their tests onto the
     # dead worker's other lanes; sending to them raised OSError, the run ended in
@@ -662,7 +653,7 @@ def test_subclass_of_an_unsupported_scheduler_is_refused_up_front(pytester):
 
 def test_collect_only_with_a_collection_error_exits_interrupted(pytester):
     # xdist and plain pytest end "Interrupted: 1 error during collection" (exit 2);
-    # single-process lanes returned early and exited 1 (cycle-6 review).
+    # single-process lanes returned early and exited 1.
     pytester.makepyfile(test_ok="def test_t(): pass\n", test_bad="import nonexistent_module_xyz\n")
     r = run(pytester, "--lanes", "3", "--co", timeout=60)
     assert r.ret == pytest.ExitCode.INTERRUPTED, r.stdout.str()
@@ -671,7 +662,7 @@ def test_collect_only_with_a_collection_error_exits_interrupted(pytester):
 @pytest.mark.parametrize("mode", [["--lanes", "3"], ["-n", "2", "--lanes", "2"]], ids=["lanes", "hybrid"])
 def test_no_dead_symlinks_left_in_lane_basetemps(pytester, mode):
     # pytest removes dangling "<name>current" links from its basetemp when retention drops
-    # directories; lanes' own basetemps kept them (cycle-6 review).
+    # directories; lanes' own basetemps kept them.
     pytester.makeini("[pytest]\ntmp_path_retention_policy = failed\n")
     pytester.makepyfile("""
         import pytest, time
@@ -681,7 +672,8 @@ def test_no_dead_symlinks_left_in_lane_basetemps(pytester, mode):
             assert i != 5
     """)
     bt = pytester.path / "bt"
-    run(pytester, *mode, f"--basetemp={bt}", timeout=60)
+    run(pytester, *mode, f"--basetemp={bt}", timeout=60).assert_outcomes(passed=5, failed=1)
+    assert list(bt.rglob("test_t_*")), list(bt.rglob("*"))    # the lanes did use their basetemps
     dead = [p for p in bt.rglob("*") if p.is_symlink() and not p.exists()]
     assert dead == [], dead
 
@@ -764,3 +756,19 @@ def test_invalid_interrupt_grace_is_refused_at_startup(pytester):
     r = run(pytester, "--lanes", "2", timeout=60)
     assert r.ret == pytest.ExitCode.USAGE_ERROR, r.stdout.str() + r.stderr.str()
     assert "lanes_interrupt_grace" in r.stderr.str()
+
+
+@pytest.mark.parametrize("mode", [["--lanes", "2"], ["-n", "1", "--lanes", "2"]], ids=["lanes", "hybrid"])
+def test_scheduler_missing_part_of_the_protocol_is_refused(pytester, mode):
+    # In hybrid mode only the unsupported-mode check ran: a scheduler without remove_node
+    # failed with AttributeError when a worker died, instead of at startup (X1).
+    pytester.makeconftest("""
+        class Minimal:                     # a custom scheduler with no xdist protocol at all
+            def __init__(self, config, log): pass
+        def pytest_xdist_make_scheduler(config, log):
+            return Minimal(config, log)
+    """)
+    pytester.makepyfile("def test_t(): pass")
+    r = run(pytester, *mode, timeout=60)
+    out = r.stdout.str() + r.stderr.str()
+    assert r.ret in (pytest.ExitCode.USAGE_ERROR, pytest.ExitCode.INTERNAL_ERROR) and "lacks" in out, out[-1500:]

@@ -22,6 +22,7 @@ import pytest
 
 def _p2_fixture_caches(config):
     from _pytest.fixtures import FixtureDef
+    from _pytest import setuponly
 
     problems = []
     names = set(FixtureDef.__init__.__code__.co_names)
@@ -31,13 +32,24 @@ def _p2_fixture_caches(config):
         problems.append("P2 FixtureDef now uses __slots__")
     if not hasattr(FixtureDef, "__weakref__"):
         problems.append("P2 FixtureDef instances can no longer be weakly referenced")
+    if "cached_param" not in setuponly.pytest_fixture_setup.__code__.co_names:
+        problems.append("P2 --setup-show no longer keeps FixtureDef.cached_param")
     return "\n  ".join(problems) or None
 
 
 def _p3_logging(config):
     lp = config.pluginmanager.get_plugin("logging-plugin")
-    if lp is not None and not (hasattr(lp, "caplog_handler") and hasattr(lp, "report_handler")):
-        return "P3 LoggingPlugin handler attributes"
+    if lp is None:
+        return None
+    if not all(hasattr(lp, a) for a in ("caplog_handler", "report_handler", "log_level")):
+        return "P3 LoggingPlugin.caplog_handler/report_handler/log_level"
+    # capture._LogDispatch stands in for these handlers and clones one per lane.
+    try:
+        clone = type(lp.caplog_handler)()
+    except TypeError as e:
+        return f"P3 LoggingPlugin handler class can no longer be made without arguments ({e})"
+    if not all(hasattr(clone, a) for a in ("records", "stream", "reset", "clear")):
+        return "P3 LogCaptureHandler.records/stream/reset/clear"
     return None
 
 
@@ -304,6 +316,8 @@ def _x4_worker_attributes(config):
             and "workerinfo" in DSession.worker_workerready.__code__.co_names
             and "workeroutput" in WorkerController.process_from_remote.__code__.co_names):
         return "X4 xdist WorkerController.workerinput/workerinfo/workeroutput"
+    if not isinstance(vars(WorkerController).get("shutting_down"), property):
+        return "X4 xdist WorkerController.shutting_down (LaneProxy follows it)"
     return None
 
 

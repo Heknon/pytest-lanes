@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from .scheduling import reject_unsupported
+from .scheduling import check_scheduler
 
 
 class LaneProxy:
@@ -211,5 +211,5 @@ class LanesController:
     @pytest.hookimpl(wrapper=True)
     def pytest_xdist_make_scheduler(self, config, log):
         sched = yield                       # whatever xdist or your conftest returned
-        reject_unsupported(sched)
+        check_scheduler(sched)
         return LaneMux(sched, self.m, config)

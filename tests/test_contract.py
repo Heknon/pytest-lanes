@@ -4,7 +4,8 @@ import re
 import sys
 
 import pytest
-from lanes_testing import BASE, max_overlap, report_log, run, stamp_pids, stamps_dir
+from lanes_testing import (ENV_SCHED, RECOMMENDED_SCHED, max_overlap, report_log, run,
+                           stamp_pids, stamps_dir, without)
 
 
 def test_groups_serial_across_parallel(pytester, monkeypatch):
@@ -13,16 +14,14 @@ def test_groups_serial_across_parallel(pytester, monkeypatch):
         """
         import time, pytest
         from stamping import stamped
-        SEEN = {}
         @pytest.mark.parametrize("g", "ABCD")
         @pytest.mark.parametrize("i", range(2))
         def test_x(g, i, request):
-            request.node.add_marker(pytest.mark.xdist_group(name=g))
             with stamped(request):
                 time.sleep(1)
         """
     )
-    # marks added at runtime are too late for scheduling -> use collection hook instead
+    # Marks added while a test runs are too late for scheduling: add them at collection.
     pytester.makeconftest(
         """
         import pytest
@@ -33,7 +32,9 @@ def test_groups_serial_across_parallel(pytester, monkeypatch):
     )
     r = run(pytester, "--lanes", "4", "--lanes-dist", "loadgroup", "-v")
     r.assert_outcomes(passed=8)
-    assert max_overlap(stamps) == 4           # the 4 groups ran in parallel, 2 tests each
+    assert max_overlap(stamps) == 4           # the 4 groups ran in parallel ...
+    for g in "ABCD":                          # ... and each group's 2 tests one after the other
+        assert max_overlap(stamps, match=f"-{g}]") == 1, g
 
 
 def test_session_fixture_is_per_lane_like_xdist_worker(pytester):
@@ -64,27 +65,37 @@ def test_session_fixture_is_per_lane_like_xdist_worker(pytester):
     r.stdout.fnmatch_lines(["*SESSION_SETUPS=2*"])   # one per lane, reused inside lane
 
 
-def test_teardown_order_and_finalizers_per_lane(pytester):
+def test_teardown_order_and_finalizers_per_lane(pytester, monkeypatch):
+    # Each lane tears down its own fixtures, innermost first: a test's function fixture,
+    # then (after the lane's last test) its own copy of the module fixture.
+    monkeypatch.setenv("LANES_OUT", str(pytester.path))
     pytester.makepyfile(
         """
-        import pytest, time
-        LOG = []
+        import os, pytest, time
+        def log(worker_id, line):
+            with open(os.path.join(os.environ["LANES_OUT"], f"log-{worker_id}"), "a") as f:
+                f.write(line + "\\n")
         @pytest.fixture(scope="module")
-        def mod(request):
-            name = request.node.name
+        def mod(worker_id):
             yield
+            log(worker_id, "mod")
         @pytest.fixture
-        def f(request):
+        def f(request, worker_id):
             yield request.node.name
-            LOG.append(request.node.name)
-        @pytest.mark.parametrize("g", ["x", "y"])
+            log(worker_id, request.node.name)
+        @pytest.mark.parametrize("g", ["x", "y", "z", "w"])
         def test_t(g, f, mod):
             time.sleep(0.2)
             assert f.endswith(f"[{g}]")
         """
     )
     r = run(pytester, "--lanes", "2")
-    r.assert_outcomes(passed=2)
+    r.assert_outcomes(passed=4)
+    logs = [p.read_text().split() for p in sorted(pytester.path.glob("log-ln*"))]
+    assert len(logs) == 2, logs                          # both lanes ran tests
+    for lines in logs:
+        assert lines[-1] == "mod" and lines.count("mod") == 1, logs
+        assert all(name.startswith("test_t[") for name in lines[:-1]) and lines[:-1], logs
 
 
 def test_maxfail_stops_scheduling(pytester):
@@ -121,7 +132,6 @@ def test_rerunfailures_protocol_plugin(pytester):
 
 
 def test_node_hooks_opt_in_for_observers(pytester):
-    pytest.importorskip("xdist")
     pytester.makeconftest(
         """
         SEEN = []
@@ -179,8 +189,7 @@ def test_warnings_captured_per_test_on_context_aware_interpreter(pytester, monke
     monkeypatch.setenv("PYTHON_CONTEXT_AWARE_WARNINGS", "1")
     pytester.makeconftest(WARN_CONFTEST)
     pytester.makepyfile(WARN_TESTS)
-    base = [a for a in BASE if a != "no:warnings"]
-    base.remove("-p")                         # the one preceding "no:warnings"
+    base = without("warnings")
     out = {}
     for mode in (["-n", "5"], ["--lanes", "5"], ["-n", "1", "--lanes", "5"]):
         r = pytester.runpytest_subprocess(*base, *mode, "-rf")
@@ -233,18 +242,6 @@ def test_capfd_routed_to_serial_phase(pytester):
     assert re.search(r"\[ln-serial\].*PASSED", out) and "test_fd" in out, out
 
 
-CUSTOM_SCHED = """
-import pytest
-from xdist.scheduler import LoadScopeScheduling
-
-class EnvScheduling(LoadScopeScheduling):
-    # nodeid like 'test_x.py::test_step[envB-2]' -> scope 'envB'
-    def _split_scope(self, nodeid):
-        return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
-
-def pytest_xdist_make_scheduler(config, log):
-    return EnvScheduling(config, log)
-"""
 
 ENV_TESTS = """
 import os, time, threading, pytest
@@ -264,9 +261,8 @@ def test_step(env, step, worker_id, request):
 
 @pytest.mark.parametrize("mode", [["-n", "3"], ["--lanes", "3"]], ids=["xdist", "lanes"])
 def test_same_custom_scheduler_both_backends(pytester, monkeypatch, mode):
-    pytest.importorskip("xdist")
     stamps = stamps_dir(pytester, monkeypatch)
-    pytester.makeconftest(CUSTOM_SCHED)
+    pytester.makeconftest(ENV_SCHED)
     pytester.makepyfile(ENV_TESTS)
     r = run(pytester, *mode, "-v")
     r.assert_outcomes(passed=9)
@@ -298,7 +294,6 @@ def test_scheduler_sees_worker_shaped_nodes(pytester, mode, total):
     pytester.makepyfile("import pytest\n@pytest.mark.parametrize('i', range(4))\ndef test_t(i): pass")
     r = run(pytester, *mode, "-s")
     r.assert_outcomes(passed=4)
-    import re
     nodes = [re.match(r"NODE (\S+) workerid=(\S+) count=(\d+) uid=(\S+) info=(\S+)", ln).groups()
              for ln in r.outlines if ln.startswith("NODE ")]
     assert len(nodes) == total, r.outlines
@@ -308,8 +303,6 @@ def test_scheduler_sees_worker_shaped_nodes(pytester, mode, total):
 
 
 def test_report_parity_with_xdist_loadgroup(pytester):
-    import json
-    pytest.importorskip("xdist")
     pytest.importorskip("pytest_reportlog")
     pytester.makepyfile("""
         import pytest, logging
@@ -329,10 +322,7 @@ def test_report_parity_with_xdist_loadgroup(pytester):
             for it in items: it.add_marker(pytest.mark.xdist_group(name=it.callspec.params["g"]))
     """)
     def rl(*args):
-        run(pytester, *args, "--report-log=rl.jsonl")
-        return sorted((e["nodeid"], e["when"], e["outcome"], tuple(s[0] for s in e["sections"]))
-                      for e in map(json.loads, open(pytester.path / "rl.jsonl"))
-                      if e.get("$report_type") == "TestReport")
+        return report_log(pytester, *args)[1]
     a = rl("-n", "2", "--dist", "loadgroup")
     b = rl("--lanes", "2", "--lanes-dist", "loadgroup")
     assert a == b                            # nodeids incl. '@group' suffix now match exactly
@@ -341,9 +331,8 @@ def test_report_parity_with_xdist_loadgroup(pytester):
 
 # ------------------------------------------------------------ hybrid: -n N --lanes M
 def test_hybrid_custom_scheduler_pins_env_to_one_lane(pytester, monkeypatch):
-    pytest.importorskip("xdist")
     stamps = stamps_dir(pytester, monkeypatch)
-    pytester.makeconftest(CUSTOM_SCHED)
+    pytester.makeconftest(ENV_SCHED)
     pytester.makepyfile("""
         import os, threading, time, pytest
         from stamping import stamped
@@ -373,7 +362,6 @@ def test_hybrid_custom_scheduler_pins_env_to_one_lane(pytester, monkeypatch):
 
 
 def test_hybrid_report_parity_with_plain_xdist(pytester):
-    import json
     pytest.importorskip("pytest_reportlog")
     pytester.makeconftest("""
         import pytest
@@ -390,10 +378,7 @@ def test_hybrid_report_parity_with_plain_xdist(pytester):
             assert not (g == "B" and i == 1)
     """)
     def rl(*args):
-        run(pytester, *args, "--report-log=rl.jsonl")
-        return sorted((e["nodeid"], e["when"], e["outcome"], tuple(s[0] for s in e["sections"]))
-                      for e in map(json.loads, open(pytester.path / "rl.jsonl"))
-                      if e.get("$report_type") == "TestReport")
+        return report_log(pytester, *args)[1]
     assert rl("-n", "2", "--dist", "loadgroup") == rl("-n", "2", "--lanes", "2", "--dist", "loadgroup")
 
 
@@ -408,8 +393,7 @@ def test_hybrid_worker_crash_is_reported_and_rescheduled(pytester):
             if env == "envZ" and step == 1 and not flag.exists():
                 flag.write_text("x"); os._exit(1)
     """)
-    pytester.makeconftest(CUSTOM_SCHED.replace("rsplit(\"[\", 1)[1].split(\"-\", 1)[0]",
-                                               "rsplit(\"[\", 1)[1].split(\"-\", 1)[0]"))
+    pytester.makeconftest(ENV_SCHED)
     r = run(pytester, "-n", "1", "--lanes", "3", f"--basetemp={pytester.path / 'bt'}", "-v")
     r.stdout.fnmatch_lines(["*node down*", "*FAILED*envZ-1*", "*replacing crashed worker*"])
     # every test eventually passed on the replacement worker
@@ -423,8 +407,8 @@ def test_hybrid_crash_collateral_is_reported_and_rerun_under_loadscope(pytester)
     # unfinished environments whole, starting at the step that was running: plain xdist
     # reports its crashed test failed and runs it again. In hybrid mode the sibling lane's
     # in-flight test (collateral) gets the same treatment, and every environment's steps
-    # still run in order, on one lane (round 7; DESIGN.md F5).
-    pytester.makeconftest(CUSTOM_SCHED)
+    # still run in order, on one lane.
+    pytester.makeconftest(ENV_SCHED)
     pytester.makepyfile("""
         import os, time, pytest
         @pytest.mark.parametrize("env,step", [(e, i) for e in ("envP", "envQ") for i in range(3)],
@@ -451,30 +435,11 @@ def test_hybrid_crash_collateral_is_reported_and_rerun_under_loadscope(pytester)
         worker, name = line.split()
         env, step = name.split("-")
         runs.setdefault((env, worker.split(".")[0]), []).append((int(step), worker))
-    for (env, _), steps in runs.items():                 # in order, one lane, per process
+    for steps in runs.values():                          # in order, one lane, per process
         assert [s for s, _ in steps] == sorted(s for s, _ in steps), runs
         assert len({w for _, w in steps}) == 1, runs
 
 
-#: The scheduler README.md recommends, verbatim: a lane gets its next environment only
-#: when it has at most one test left (the one a worker holds back until it knows what
-#: comes next). xdist's loadscope tops a node up at two, so an environment could wait
-#: behind two tests of another while other lanes sat idle.
-RECOMMENDED_SCHED = """
-from xdist.scheduler import LoadScopeScheduling
-
-class EnvScheduling(LoadScopeScheduling):
-    def _split_scope(self, nodeid):     # 'test_x.py::test_step[envB-2]' -> 'envB'
-        return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
-
-    def _reschedule(self, node):
-        # Queue the next environment only behind the lane's last test, not its last two.
-        if node.shutting_down or not self.workqueue or self._pending_of(self.assigned_work[node]) <= 1:
-            super()._reschedule(node)
-
-def pytest_xdist_make_scheduler(config, log):
-    return EnvScheduling(config, log)
-"""
 
 
 @pytest.mark.parametrize("mode", [["-n", "2"], ["--lanes", "2"], ["-n", "1", "--lanes", "2"]],

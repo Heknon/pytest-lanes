@@ -67,7 +67,9 @@ class SingleProcessSession(LaneRunner):
                     node_hooks.down(node=n, error=None)
 
         if not self.stopping(session):
-            self.ledger.check_complete(session.items)
+            from xdist.scheduler import LoadScopeScheduling
+            self.ledger.check_complete(parallel, serial,
+                                       by_nodeid=isinstance(self.sched, LoadScopeScheduling))
             self.ledger.raise_if_violated()
         if session.shouldfail or session.shouldstop:   # xdist's DSession: Interrupted either way
             raise session.Interrupted(session.shouldfail or session.shouldstop)

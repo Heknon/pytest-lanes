@@ -26,7 +26,16 @@ UNSUPPORTED_SCHEDULERS = ("EachScheduling", "WorkStealingScheduling")
 #: X1: what lanes call on a scheduler. Probed on each instance, never by import
 #: name (xdist 3.6.1 lacks some module-level helpers).
 SCHEDULER_PROTOCOL = ("add_node", "add_node_collection", "schedule", "mark_test_complete",
-                      "tests_finished", "collection_is_completed")
+                      "remove_node", "tests_finished", "collection_is_completed", "has_pending",
+                      "nodes")
+
+
+def check_scheduler(sched) -> None:
+    """X1, on the scheduler instance (custom schedulers too), and the unsupported modes."""
+    missing = [m for m in SCHEDULER_PROTOCOL if not hasattr(sched, m)]
+    if missing:
+        raise pytest.UsageError(f"pytest-threadlanes: scheduler {type(sched).__name__} lacks {missing}")
+    reject_unsupported(sched)
 
 
 def reject_unsupported(sched) -> None:
@@ -63,11 +72,8 @@ def make_scheduler(config, numnodes: int):
     finally:
         opt.tx = saved
 
-    missing = [m for m in SCHEDULER_PROTOCOL if not hasattr(sched, m)]
-    if missing:
-        raise pytest.UsageError(f"pytest-threadlanes: scheduler {type(sched).__name__} lacks {missing}")
+    check_scheduler(sched)
     sched.numnodes = numnodes
-    reject_unsupported(sched)
     return sched
 
 

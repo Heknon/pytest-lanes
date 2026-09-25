@@ -1,4 +1,4 @@
-import logging, time, threading, pytest
+import logging, time, pytest
 log = logging.getLogger("demo")
 ORDER = {}
 def _step(group, i, counter, caplog):

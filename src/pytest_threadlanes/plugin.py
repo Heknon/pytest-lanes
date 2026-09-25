@@ -14,11 +14,11 @@ Module map:
     single.py        --lanes N: this process plays xdist controller and workers
     worker.py        -n P --lanes M, worker process: M lanes behind xdist's channel
     controller.py    -n P --lanes M, controller: LaneMux / LaneProxy around xdist's DSession
-    scheduling.py    building the real xdist scheduler; loadgroup nodeid suffix
-    isolation.py     per-lane pytest state (touchpoints P1, P2, P6, P7)
-    capture.py       per-lane stdout/stderr and logging (P3)
+    scheduling.py    building the real xdist scheduler; loadgroup nodeid suffix (X1, P5)
+    isolation.py     per-lane pytest state, the patch guard (P1, P2, P6, P7, P10-P12, P14)
+    capture.py       per-lane stdout/stderr, redirects and logging (P3, P8, P13, P15)
     hookrouting.py   the 4 controller hooks replayed on the main thread (P4)
-    compat.py        shims for third-party plugins that assume one test per process (C1)
+    compat.py        shims for third-party plugins that assume one test per process (C1, C2)
     integrity.py     run-time check that reports match what the lanes ran
     detector/        --lanes-detect: which tests change process-wide state (debugging tool)
     probes.py        fail-closed startup checks of every internal we touch

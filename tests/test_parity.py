@@ -7,7 +7,7 @@ import json
 import re
 
 import pytest
-from lanes_testing import MODES, dist_args, report_log, run
+from lanes_testing import ENV_SCHED, MODES, dist_args, report_log, run
 
 ALL_OUTCOMES_CONFTEST = """
 import pytest
@@ -102,7 +102,10 @@ def test_large_output_without_trailing_newline_has_parity(pytester):
         def test_big(i):
             sys.stdout.write("x" * 2_000_000); print("tail", end="")
     """)
-    rows = {name: report_log(pytester, *mode)[1] for name, mode in MODES.items()}
+    results = {name: report_log(pytester, *mode) for name, mode in MODES.items()}
+    for result, _ in results.values():
+        result.assert_outcomes(passed=3)
+    rows = {name: rows for name, (_, rows) in results.items()}
     assert rows["lanes"] == rows["xdist"] == rows["hybrid"]
 
 
@@ -168,8 +171,7 @@ def test_rerunfailures_under_concurrent_lanes_in_a_worker(pytester):
 def test_group_suffix_follows_dist_as_in_xdist(pytester, name):
     # xdist's worker adds the @group suffix when --dist is loadgroup, whatever scheduler a
     # conftest returns; single-process lanes decided by the scheduler's class instead.
-    from test_contract import CUSTOM_SCHED
-    pytester.makeconftest(CUSTOM_SCHED)
+    pytester.makeconftest(ENV_SCHED)
     pytester.makepyfile("""
         import pytest
         @pytest.mark.xdist_group("g1")
@@ -183,7 +185,7 @@ def test_group_suffix_follows_dist_as_in_xdist(pytester, name):
     assert all(row[0].endswith("@g1") for row in xdist), xdist
 
 
-# ---------------------------------------------------------------- cycle-6 review (rerunfailures)
+# ---------------------------------------------------------------- rerunfailures
 RERUN_ENV_CONFTEST = """
 import json, os, threading, pytest
 LOG = os.path.join(os.path.dirname(__file__), "ev.log")
@@ -224,7 +226,6 @@ def test_rerun_does_not_tear_down_another_lanes_module_fixture(pytester, name):
     outcomes = r.parseoutcomes()
     assert (outcomes.get("passed"), outcomes.get("rerun")) == (72, 1), r.stdout.str()[-2000:]
     import collections
-    import json
     events = [json.loads(line) for line in open(pytester.path / "ev.log")]
     count = collections.Counter((kind, mod, wid) for kind, mod, wid in events)
     for (kind, mod, wid), n in count.items():

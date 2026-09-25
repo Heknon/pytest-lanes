@@ -22,6 +22,45 @@ MODES = {
 }
 CONTEXT_AWARE_WARNINGS = sys.version_info >= (3, 14)
 
+#: The user's scheduling pattern: one scope per environment, from a parametrize id
+#: like 'test_x.py::test_step[envB-2]' -> 'envB'.
+ENV_SCHED = """
+from xdist.scheduler import LoadScopeScheduling
+
+class EnvScheduling(LoadScopeScheduling):
+    def _split_scope(self, nodeid):
+        return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
+
+def pytest_xdist_make_scheduler(config, log):
+    return EnvScheduling(config, log)
+"""
+
+#: The scheduler README.md recommends, verbatim: a lane gets its next environment only
+#: when it has at most one test left (the one a worker holds back until it knows what
+#: comes next). xdist's loadscope tops a node up at two, so an environment could wait
+#: behind two tests of another while other lanes sat idle.
+RECOMMENDED_SCHED = """
+from xdist.scheduler import LoadScopeScheduling
+
+class EnvScheduling(LoadScopeScheduling):
+    def _split_scope(self, nodeid):     # 'test_x.py::test_step[envB-2]' -> 'envB'
+        return nodeid.rsplit("[", 1)[1].split("-", 1)[0]
+
+    def _reschedule(self, node):
+        # Queue the next environment only behind the lane's last test, not its last two.
+        if node.shutting_down or not self.workqueue or self._pending_of(self.assigned_work[node]) <= 1:
+            super()._reschedule(node)
+
+def pytest_xdist_make_scheduler(config, log):
+    return EnvScheduling(config, log)
+"""
+
+
+def without(*plugins) -> list:
+    """BASE without some of its ``-p no:X`` pairs: those plugins stay on."""
+    return [a for pair in zip(BASE[::2], BASE[1::2]) if pair[1] not in {f"no:{p}" for p in plugins}
+            for a in pair]
+
 
 def run(pytester, *args, timeout=120):
     return pytester.runpytest_subprocess(*BASE, *args, timeout=timeout)
@@ -49,7 +88,7 @@ def report_log(pytester, *args, timeout=120):
 
 #: For test bodies: ``with stamped(request):`` records when the body ran (and in which
 #: process) in the directory $LANES_STAMPS. Asserting overlap instead of wall-clock
-#: duration keeps the timing tests stable under load (backlog item 2).
+#: duration keeps the timing tests stable under load.
 STAMPED = '''
 import contextlib as _cl, os as _os, time as _time
 @_cl.contextmanager
@@ -73,10 +112,13 @@ def stamps_dir(pytester, monkeypatch):
     return d
 
 
-def max_overlap(stamps, pid=None) -> int:
-    """The largest number of stamped test bodies running at one moment (in one process)."""
+def max_overlap(stamps, pid=None, match=None) -> int:
+    """The largest number of stamped test bodies running at one moment (in one process;
+    of the tests whose stamp name contains ``match``)."""
     events = []
     for f in stamps.iterdir():
+        if match is not None and match not in f.name:
+            continue
         start, end, owner = f.read_text().split()
         if pid is None or int(owner) == pid:
             events += [(float(start), 1), (float(end), -1)]

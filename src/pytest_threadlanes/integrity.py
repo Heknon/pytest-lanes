@@ -153,9 +153,15 @@ class Ledger:
             self.violation(f"lane {lane_id}: {nodeid} finished without its logstart/logfinish")
         self.done[nodeid] += 1
 
-    def check_complete(self, items) -> None:
-        """Every collected item done as many times as collected (single-process, not stopped)."""
-        expected = Counter(it.nodeid for it in items)
+    def check_complete(self, scheduled, serial=(), *, by_nodeid: bool = False) -> None:
+        """Every collected item done as many times as collected (single-process, not
+        stopped). ``by_nodeid``: the scheduler keys its work by nodeid (xdist's loadscope
+        and its subclasses), so a duplicated scheduled item runs once, as under ``-n``;
+        exclusive items (``serial``) run as collected."""
+        expected = Counter(it.nodeid for it in scheduled)
+        if by_nodeid:
+            expected = Counter(dict.fromkeys(expected, 1))
+        expected.update(it.nodeid for it in serial)
         if self.done == expected:
             return
         for nodeid in sorted(set(expected) | set(self.done)):

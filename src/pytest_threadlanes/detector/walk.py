@@ -108,7 +108,7 @@ class Snapshot(dict):
 
     unexpanded: frozenset = frozenset()
     truncated: bool = False
-    paths: dict = {}          # id(object) -> the path it was expanded at
+    paths: dict | None = None  # id(object) -> the path it was expanded at (from the walk)
 
     def covers(self, path: str, ancestors) -> bool:
         """Would ``path`` be in this snapshot if it existed? No when the walk did not
