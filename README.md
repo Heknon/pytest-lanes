@@ -1,7 +1,5 @@
 # pytest-threadlanes
 
-> **Name.** Distribution `pytest-threadlanes`, import package `pytest_threadlanes`. It was developed as `pytest-lanes`; that name on PyPI belongs to an unrelated project (one subprocess per declared lane) with the same import package and plugin entry, so the two cannot be installed together and `pip install pytest-lanes` gets the other one. The command-line options (`--lanes`, `--lanes-dist`, …), markers and ini settings keep the `lanes` names. The repository is `Heknon/pytest-threadlanes`.
-
 Run pytest-xdist's own schedulers on **thread lanes**: in one process, or across many xdist processes. Long, I/O-bound tests can then run thousands-wide without paying 150–500 MB of memory per concurrent test.
 
 ```bash
@@ -104,7 +102,7 @@ Other limits:
 - Before Python 3.14, `pytest.warns`, `pytest.deprecated_call` and `recwarn` change process-wide warning state, so a test using them must be `lanes_exclusive`. Otherwise it fails and says so. `warnings.catch_warnings` used directly is not guarded.
 - `--pdb` is unsupported, as it is under xdist, and so is `--trace` in single-process mode; a `breakpoint()` on a lane cannot read the terminal either. To debug a test, run it without `--lanes` (and without `-n`): the same scheduler, fixtures and code, in plain pytest.
 
-The full list, with workarounds, is in [DESIGN.md → Flags](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/DESIGN.md#flags-no-complete-fix).
+The full list, with workarounds, is in [DESIGN.md → Limitations](https://github.com/Heknon/pytest-threadlanes/blob/HEAD/DESIGN.md#limitations).
 
 ### Finding shared state: `--lanes-detect`
 

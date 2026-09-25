@@ -482,7 +482,7 @@ def pytest_xdist_make_scheduler(config, log):
 def test_recommended_scheduler_does_not_queue_an_environment_behind_another(pytester, monkeypatch, mode):
     # envA: a short step, then two long ones. With stock loadscope, envC is queued on
     # envA's lane as soon as envA has two tests left, and waits there while the other
-    # lane finishes envB and sits idle (round 7, DESIGN.md item 50).
+    # lane finishes envB and sits idle (README → Scheduling).
     stamps = stamps_dir(pytester, monkeypatch)
     pytester.makeconftest(RECOMMENDED_SCHED)
     pytester.makepyfile("""

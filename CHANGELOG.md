@@ -5,8 +5,7 @@ Versions follow [semantic versioning](https://semver.org). The version lives in
 
 ## 0.1.0
 
-First release, as `pytest-threadlanes` (developed as `pytest-lanes`; that name on PyPI
-belongs to an unrelated project).
+First release.
 
 - Three modes from one xdist scheduler: `-n P` (plain xdist), `--lanes N` (one process,
   N thread lanes) and `-n P --lanes M` (P xdist processes × M lanes).
