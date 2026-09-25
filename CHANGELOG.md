@@ -1,7 +1,8 @@
 # Changelog
 
 Versions follow [semantic versioning](https://semver.org). The version lives in
-`pyproject.toml` only; a release is a `vX.Y.Z` tag (see README → Releasing).
+`pyproject.toml` only; merging a new version into `master` releases it and tags it
+`vX.Y.Z` (see README → Releasing).
 
 ## 0.1.0
 

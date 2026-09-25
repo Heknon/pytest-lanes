@@ -69,7 +69,7 @@ Other files:
 - `demo/` is a manual smoke test (see `demo/README.md`).
 - `scripts/matrix.sh` runs the suite against several pytest/xdist versions, in separate venvs.
 - `.github/workflows/ci.yml` is the CI workflow, run by hand only (`workflow_dispatch`): GitHub runners are paid.
-- `.github/workflows/release.yml` publishes to PyPI (Trusted Publishing) and makes a GitHub Release when a `vX.Y.Z` tag matching `pyproject.toml`'s version is pushed; it tests the built wheel on one combo first. A manual run is a dry run. `CHANGELOG.md` gets a section per release (README → Releasing). Never push a release tag without the user's go-ahead: it publishes.
+- `.github/workflows/release.yml` releases on merge: a push to `master` whose `pyproject.toml` version has no `vX.Y.Z` tag builds, tests the built wheel on one combo, publishes to PyPI (Trusted Publishing), then tags the commit and makes the GitHub Release. A manual run is a dry run. `CHANGELOG.md` gets a section per release (README → Releasing).
 
 ## Internal touchpoints
 
@@ -176,7 +176,7 @@ These are not bugs to "fix" by weakening the invariants.
 - Keep `plugin.py` free of logic, and keep each touchpoint's patch and restore together in one context manager.
 - Never set `report.node` to a `ThreadNode` in hybrid worker mode, because reports must stay serializable. Use `report.lane_id` instead.
 - In hybrid mode, `--lanes` means lanes per process; the total is `-n` × `--lanes`. Don't change this silently.
-- Never push a release tag (`vX.Y.Z`) without the user's go-ahead: it publishes to PyPI.
+- Never merge a version bump into `master` without the user's go-ahead: the merge publishes to PyPI.
 
 ## Open questions for the user
 

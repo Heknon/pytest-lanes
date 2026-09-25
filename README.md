@@ -229,23 +229,22 @@ Rules that keep it correct:
 
 ## Releasing
 
-The version lives only in `pyproject.toml`. A release is a tag `vX.Y.Z` that matches it; pushing the tag runs `.github/workflows/release.yml`:
+The version lives only in `pyproject.toml`. Merging a new version into `master` releases it: `.github/workflows/release.yml` sees that `pyproject.toml`'s version has no `vX.Y.Z` tag yet, and then
 
-1. **build**: checks the tag against `pyproject.toml`, builds the wheel and sdist, `twine check --strict`, and loads the plugin from the installed wheel;
-2. **test**: the suite once (Python 3.12, pytest 9.1.1, xdist 3.8.0), against the built wheel;
-3. **publish**: to PyPI with Trusted Publishing (no token is stored in GitHub);
-4. **github-release**: a GitHub Release with the wheel, the sdist, and the version's `CHANGELOG.md` section as notes.
+1. **build**: builds the wheel and sdist, checks them with `twine check --strict`, loads the plugin from the installed wheel, and takes the version's `CHANGELOG.md` section as release notes (a missing section stops the release here);
+2. **test**: runs the suite once (Python 3.12, pytest 9.1.1, xdist 3.8.0) against the built wheel;
+3. **publish**: uploads to PyPI with Trusted Publishing (no token is stored in GitHub);
+4. **github-release**: tags the merged commit `vX.Y.Z` and creates the GitHub Release with the wheel, the sdist and the notes.
 
-To release:
+A merge that does not change the version stops after the first check. To release:
 
 ```bash
-# 1. bump version in pyproject.toml and add a "## X.Y.Z" section to CHANGELOG.md
-scripts/matrix.sh                         # the real gate: 3.12-3.14t x pytest/xdist combos
-git commit -am "Release X.Y.Z" && git push
-git tag vX.Y.Z && git push origin vX.Y.Z  # starts the release workflow
+# on a branch: bump version in pyproject.toml, add a "## X.Y.Z" section to CHANGELOG.md
+scripts/matrix.sh        # the real gate: 3.12-3.14t x 4 pytest/xdist combos
+# then merge the branch into master: the merge publishes X.Y.Z
 ```
 
-A manual run of the workflow (Actions → release → Run workflow) builds and tests without publishing: a dry run.
+A manual run of the workflow (Actions → release → Run workflow) builds and tests without publishing or tagging: a dry run.
 
 One-time setup, before the first release:
 - On pypi.org → Your account → Publishing → *Add a new pending publisher*: project `pytest-threadlanes`, owner `Heknon`, repository `pytest-threadlanes`, workflow `release.yml`, environment `pypi`.
